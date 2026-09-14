@@ -171,7 +171,7 @@ post-script applies the actions via `PUT /rest/api/3/issue/{key}` with
 To override these defaults per repo or org, create a custom harness for the
 triage agent the same way the [code agent](code.md#how-to-configure) does —
 a `.fullsend/triage.yaml` with a `base:` pointing at
-[`harness/triage.yaml`](../harness/triage.yaml) and your own `env.runner`
+[`harness/triage.yaml`](https://github.com/fullsend-ai/agents/blob/main/harness/triage.yaml) and your own `env.runner`
 values, referenced from `.fullsend/config.yaml`.
 
 ### Issue filing allowlist
@@ -317,4 +317,4 @@ Effort: `high` (explicit in the harness; override per run with `fullsend run --e
 
 ## Source
 
-[`harness/triage.yaml`](../harness/triage.yaml)
+[`harness/triage.yaml`](https://github.com/fullsend-ai/agents/blob/main/harness/triage.yaml)
