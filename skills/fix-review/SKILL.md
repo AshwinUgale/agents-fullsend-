@@ -110,12 +110,12 @@ The workflow pre-fetches the review body to `/sandbox/workspace/review-body.txt`
 
 ```bash
 REVIEW_BODY_FILE="/sandbox/workspace/review-body.txt"
-[ -s "${REVIEW_BODY_FILE}" ] || echo "::warning::No review body — trying API fallback"
+grep -q '[^[:space:]]' "${REVIEW_BODY_FILE}" || echo "::warning::Empty review body, recovering"
 cat "${REVIEW_BODY_FILE}"
 ```
 
-If empty or newline-only, recover via overlay Review findings fallback. Do not
-re-fetch PR reviews. If still empty, log error or disagree.
+If empty/whitespace-only, recover via your forge skill's Review findings
+fallback. Do not re-fetch PR reviews. If empty, log error or disagree.
 
 **Step 2b — Understand the review before acting:**
 

@@ -38,13 +38,15 @@ comment bodies contain newlines.
 
 ```bash
 REVIEW_BODY_FILE="/sandbox/workspace/review-body.txt"
-REVIEW_COMMENT=$(gh api --paginate --slurp "repos/${REPO_FULL_NAME}/issues/${PR_NUMBER}/comments" \
-  | jq -r 'add // [] | [.[] | select(.user.login | endswith("-review[bot]")) | select(.body | contains("<!-- fullsend:review-agent -->"))] | last | .body // empty')
-if [ -n "${REVIEW_COMMENT}" ]; then
-  echo "::notice::Recovered review findings from issue comment API fallback"
-  printf '%s\n' "${REVIEW_COMMENT}" > "${REVIEW_BODY_FILE}"
-else
-  echo "::error::No review body found at ${REVIEW_BODY_FILE} and API fallback found no review comment"
+if [ ! -s "${REVIEW_BODY_FILE}" ] || ! grep -q '[^[:space:]]' "${REVIEW_BODY_FILE}"; then
+  REVIEW_COMMENT=$(gh api --paginate --slurp "repos/${REPO_FULL_NAME}/issues/${PR_NUMBER}/comments" \
+    | jq -r 'add // [] | [.[] | select(.user.login | endswith("-review[bot]")) | select(.body | contains("<!-- fullsend:review-agent -->"))] | last | .body // empty')
+  if [ -n "${REVIEW_COMMENT}" ]; then
+    echo "::notice::Recovered review findings from issue comment API fallback"
+    printf '%s\n' "${REVIEW_COMMENT}" > "${REVIEW_BODY_FILE}"
+  else
+    echo "::error::No review body found at ${REVIEW_BODY_FILE} and API fallback found no review comment"
+  fi
 fi
 cat "${REVIEW_BODY_FILE}"
 ```
