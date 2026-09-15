@@ -188,21 +188,28 @@ rebase request.
    Concretely:
    - Set it once step 4 (or the conflict resolution in step 5) finishes
      successfully.
-   - Set it on the step-3 no-op too, if HEAD is based on the target but has
-     diverged from the real remote PR tip (this happens when the sandbox
-     reconstructed the branch from the target, e.g. GitLab) — the rebase's
-     effect still needs publishing even though no `git rebase` command ran
-     this iteration. Do not set it when HEAD already matches the remote PR
-     tip; there is nothing new to publish.
+   - Set it on the step-3 no-op too, unconditionally, for a human rebase
+     request — the rebase's effect still needs publishing even though no
+     `git rebase` command ran this iteration (this happens when the sandbox
+     reconstructed the branch from the target, e.g. GitLab). Do not try to
+     decide this by comparing local HEAD to the real remote PR tip: step 2
+     forbids `git fetch`, and on GitLab the local `origin/${BASE}` (and
+     `origin/${BRANCH}`) tracking refs are reconstructed, not the real
+     remote tip, so that comparison can't be evaluated from inside the
+     sandbox. The post-script's own ancestry checks already treat the skip
+     as a no-op when the remote PR is already based on the current target,
+     so setting `true` here unconditionally never overrides an up-to-date
+     remote.
    - On a validation-loop retry that rewrites `agent-result.json` without
      re-running `git rebase` (see "Validation retry behavior" below), carry
      this field forward from the iteration that performed (or no-op'd) the
      rebase if its result still needs publishing.
    - Never set this field for a failed/aborted rebase or a bot-triggered
      run — bot-triggered runs never rebase, and the post-script now also
-     refuses to trust a `true` value unless `TRIGGER_SOURCE` is human. A
-     wrong `true` here makes the post-script force-push over real remote
-     commits.
+     independently verifies that the triggering `/fs-fix` instruction text
+     itself asked for a rebase (not just that `TRIGGER_SOURCE` is human)
+     before trusting a `true` value. A wrong `true` here makes the
+     post-script force-push over real remote commits.
 
 A rebase rewrites commit SHAs. That rewrite is the only allowed exception
 to "create a new commit; do not amend." It does not authorize

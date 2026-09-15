@@ -44,6 +44,9 @@
 #   FIX_ITERATION     — current iteration count
 #   ITERATION_CAP     — max iterations (default: 5)
 #   PUSH_TOKEN_SOURCE — "github-app" (for logging)
+#   HUMAN_INSTRUCTION — the harness-captured /fs-fix comment text (only for
+#                       human-triggered runs); used to confirm a rebase was
+#                       actually requested before trusting rebased_onto_target
 #   POST_FAILURE_DETAIL_MAX_LINES
 #                     — max lines of failure detail in issue/PR comments (default: 30)
 #
@@ -406,6 +409,21 @@ is_bot_user() {
   else
     [[ "${1:-}" =~ \[bot\]$ ]]
   fi
+}
+
+# is_human_rebase_request INSTRUCTION — true if a harness-captured human
+# /fs-fix instruction asked for a rebase or merge-conflict resolution (see
+# agents/fix.md's "Rebase onto the target branch" and docs/fix.md's
+# "Rebasing a stale PR"). The instruction text is HUMAN_INSTRUCTION, which
+# the triggering workflow sets from the literal PR/MR comment before the
+# sandbox is created — the fix agent cannot alter it during its own run,
+# unlike agent-result.json (PR #1296 auth-bypass finding: a non-bot
+# TRIGGER_SOURCE alone does not prove the run's instruction was a rebase
+# request, so callers must check this in addition to TRIGGER_SOURCE).
+is_human_rebase_request() {
+  local instruction
+  instruction="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')"
+  [[ "${instruction}" == *"rebase"* || "${instruction}" == *"merge conflict"* ]]
 }
 # END bundled: lib/fix-ops.lib.sh
 # shellcheck source=lib/post-failure-report.lib.sh
@@ -1690,6 +1708,20 @@ if [ -n "${RESULT_FILE}" ] && [ -f "${RESULT_FILE}" ]; then
   [ "${AGENT_REBASED_ONTO_TARGET}" = "true" ] || AGENT_REBASED_ONTO_TARGET=false
 fi
 
+# A non-bot TRIGGER_SOURCE only proves a human triggered *this run* — it
+# says nothing about whether that run's /fs-fix instruction actually asked
+# for a rebase. Any other human instruction (or a bot/no-instruction run)
+# must not be able to authorize the origin/BRANCH rebase skip below, even
+# if rebased_onto_target:true was set (by a confused agent or prompt
+# injection) — see the medium-severity auth-bypass finding on PR #1296.
+# HUMAN_INSTRUCTION is set by the triggering workflow from the literal PR/MR
+# comment before the sandbox exists, so — unlike agent-result.json — the
+# sandboxed fix agent cannot influence it during its own run.
+HUMAN_REBASE_REQUESTED=false
+if ! is_bot_user "${TRIGGER_SOURCE}" && is_human_rebase_request "${HUMAN_INSTRUCTION:-}"; then
+  HUMAN_REBASE_REQUESTED=true
+fi
+
 # ---------------------------------------------------------------------------
 # 4. Push branch (only if we have commits)
 # ---------------------------------------------------------------------------
@@ -1727,14 +1759,16 @@ if [ "${NO_PUSH}" = "false" ]; then
     # written inside the sandbox, which is influenceable by prompt injection
     # in PR/issue text or a confused agent. agents/fix.md only prompt-instructs
     # the agent never to set this field on a bot-triggered run — that is not
-    # an enforced control. TRIGGER_SOURCE, by contrast, is a harness-set env
-    # var the sandbox does not control, and a genuine rebase is never
-    # performed on a bot-triggered run (see "Rebase onto the target branch"
-    # in agents/fix.md). Require a non-bot trigger in addition to the agent's
-    # self-attestation before trusting it.
+    # an enforced control. HUMAN_REBASE_REQUESTED (computed above), by
+    # contrast, is derived from TRIGGER_SOURCE and HUMAN_INSTRUCTION — both
+    # harness-set env vars the sandbox does not control — and is true only
+    # when a human's own /fs-fix text actually asked for a rebase. A merely
+    # non-bot trigger is not enough: an unrelated human /fs-fix instruction
+    # must not authorize this skip (see "Rebase onto the target branch" in
+    # agents/fix.md).
     SKIP_REMOTE_REBASE=false
     if [ "${AGENT_REBASED_ONTO_TARGET}" = "true" ] \
-      && ! is_bot_user "${TRIGGER_SOURCE}" \
+      && [ "${HUMAN_REBASE_REQUESTED}" = "true" ] \
       && git rev-parse --verify "origin/${TARGET_BRANCH}" >/dev/null 2>&1 \
       && git merge-base --is-ancestor "origin/${TARGET_BRANCH}" HEAD 2>/dev/null \
       && ! git merge-base --is-ancestor "origin/${BRANCH}" HEAD 2>/dev/null \
