@@ -107,6 +107,15 @@ else
   assert_pass "code-optional-target-branches-not-required"
 fi
 
+# when: must guard event.source so non-Jira runs skip instead of CEL-erroring
+code_jira_when="$(jira_overlay_field "${CODE_HARNESS}" ".when")"
+if echo "${code_jira_when}" | grep -qF 'has(event.source)'; then
+  assert_pass "code-jira-when-guards-source"
+else
+  assert_fail "code-jira-when-guards-source" \
+    "when expression lacks has(event.source) guard: ${code_jira_when}"
+fi
+
 # Provider present
 if jira_overlay_field "${CODE_HARNESS}" ".providers[]" | grep -qF "providers/jira-ro.yaml"; then
   assert_pass "code-jira-provider-present"
