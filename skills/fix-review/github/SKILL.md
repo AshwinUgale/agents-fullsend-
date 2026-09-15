@@ -36,11 +36,21 @@ reviews contain only a pointer to that comment. When
 the latest matching issue comment. Use jq `last` (not `tail -1`) because
 comment bodies contain newlines.
 
+On bot-triggered runs, `TRIGGER_SOURCE` is the review bot's exact login,
+so match it directly instead of the broader `-review[bot]` suffix. On
+human-triggered runs `TRIGGER_SOURCE` is the human's username, not the
+bot's login, so keep the suffix match there.
+
 ```bash
 REVIEW_BODY_FILE="/sandbox/workspace/review-body.txt"
 if [ ! -s "${REVIEW_BODY_FILE}" ] || ! grep -q '[^[:space:]]' "${REVIEW_BODY_FILE}"; then
+  if [[ "${TRIGGER_SOURCE}" == *"[bot]" ]]; then
+    LOGIN_SELECT='select(.user.login == env.TRIGGER_SOURCE)'
+  else
+    LOGIN_SELECT='select(.user.login | endswith("-review[bot]"))'
+  fi
   REVIEW_COMMENT=$(gh api --paginate --slurp "repos/${REPO_FULL_NAME}/issues/${PR_NUMBER}/comments" \
-    | jq -r 'add // [] | [.[] | select(.user.login | endswith("-review[bot]")) | select(.body | contains("<!-- fullsend:review-agent -->"))] | last | .body // empty')
+    | jq -r "add // [] | [.[] | ${LOGIN_SELECT} | select(.body | contains(\"<!-- fullsend:review-agent -->\"))] | last | .body // empty")
   if [ -n "${REVIEW_COMMENT}" ]; then
     echo "::notice::Recovered review findings from issue comment API fallback"
     printf '%s\n' "${REVIEW_COMMENT}" > "${REVIEW_BODY_FILE}"
