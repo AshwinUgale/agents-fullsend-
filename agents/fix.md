@@ -133,7 +133,11 @@ asks for it.
   Use the `Write` tool for all file edits.
 - You cannot modify protected-path files (see "Protected paths" above) unless
   a human `/fs-fix` instruction explicitly asks you to.
-- Always create a **new commit**. Never amend an existing commit.
+- Always create a **new commit** for ordinary fixes. Do not amend an
+  existing commit. The only allowed history rewrite is a rebase onto the
+  PR's target branch when a human `/fs-fix` instruction requests it — see
+  "Rebase onto the target branch" below. That rewrite is not a license to
+  `git commit --amend` or to replace the branch for other reasons.
 - You MUST NOT use `git commit -s` or add `Signed-off-by` trailers. Autonomous
   agent commits are exempt from DCO sign-off. The post-script strips this
   trailer from agent commits before pushing.
@@ -143,6 +147,45 @@ asks for it.
   post-script will include your reasoning in the summary comment.
 - If the retry limit is exceeded and tests still fail, do not commit broken
   code. Stop. The post-script reports the failure.
+
+## Rebase onto the target branch
+
+A human `/fs-fix` instruction is a **rebase request** when it asks you to
+rebase, replay the branch onto its base, or resolve merge conflicts with
+the target branch. Examples: `rebase`, `rebase onto main`, `fix merge
+conflicts`. Honor a rebase request. Bot-triggered runs are not rebase
+requests — leave history as-is and address the review findings.
+
+Do not rebase because the branch is behind. Rebase only for a human
+rebase request.
+
+### How to rebase
+
+1. Read the PR/MR base branch from forge metadata (GitHub: `baseRefName`,
+   GitLab: `target_branch`). Call it `BASE`.
+2. If `origin/${BASE}` is not a local ref, do not `git fetch` (sandbox
+   network policy blocks it). Record in structured output that the rebase
+   could not run because the base ref is missing, and stop the rebase.
+3. If `origin/${BASE}` is already an ancestor of `HEAD`, the branch is up
+   to date. Do not rebase. If rebase was the only instruction, produce
+   structured output and stop with no new commit.
+4. Run `git rebase origin/${BASE}` (non-interactive; do not use `-i`).
+5. On conflicts: resolve them, `git add` the resolved files, then
+   `GIT_EDITOR=true git rebase --continue`. Repeat until the rebase
+   finishes. If the rebase cannot be resolved, `git rebase --abort`,
+   record the failure in structured output, and stop.
+6. Do not push. The post-script force-pushes with `--force-with-lease`.
+7. After a successful rebase, further code fixes land as **new commits**
+   on the rebased history. Do not amend rebased commits. A rebase-only
+   run needs no extra commit — the rewritten commits are the result.
+
+A rebase rewrites commit SHAs. That rewrite is the only allowed exception
+to "create a new commit; do not amend." It does not authorize
+`git commit --amend` or replacing the branch for a change of strategy.
+
+Every rebase run (success, no-op, or failure) still writes structured output
+with ≥1 `actions` item — a `fix` action whose `finding` records the rebase
+and whose `description` records the outcome.
 
 ## Structured output
 

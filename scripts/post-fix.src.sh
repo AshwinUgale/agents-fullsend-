@@ -346,16 +346,32 @@ if [ "${NO_PUSH}" = "false" ]; then
   FETCH_OUTPUT="$(git fetch origin "+refs/heads/${BRANCH}:refs/remotes/origin/${BRANCH}" 2>&1)" && FETCH_RC=0 || FETCH_RC=$?
   if [ "${FETCH_RC}" -eq 0 ]; then
     print_sanitized_gha_log "${FETCH_OUTPUT}"
-    echo "Rebasing local ${BRANCH} onto origin/${BRANCH}..."
-    REBASE_OUTPUT="$(git rebase "origin/${BRANCH}" 2>&1)" && REBASE_RC=0 || REBASE_RC=$?
-    if [ "${REBASE_RC}" -ne 0 ]; then
-      print_sanitized_gha_log "${REBASE_OUTPUT}"
-      git rebase --abort 2>/dev/null || true
-      post_fail_to_pr push-rejected \
-        "Could not rebase local '${BRANCH}' onto origin/${BRANCH}: the remote branch has commits that conflict with the agent's changes. Resolve the conflict on the PR/MR and re-run /fs-fix.
-${REBASE_OUTPUT}"
+    # If the agent already rebased onto the PR target (issue #565), replaying
+    # local commits onto the stale remote PR tip would undo that rebase.
+    # Detect: HEAD is based on origin/TARGET_BRANCH, has diverged from
+    # origin/BRANCH, and the target itself has moved past the remote PR tip.
+    # GitLab reconstruction of an up-to-date PR does not match (target is
+    # still an ancestor of origin/BRANCH), so issue #1228 is unchanged.
+    SKIP_REMOTE_REBASE=false
+    if git rev-parse --verify "origin/${TARGET_BRANCH}" >/dev/null 2>&1 \
+      && git merge-base --is-ancestor "origin/${TARGET_BRANCH}" HEAD 2>/dev/null \
+      && ! git merge-base --is-ancestor "origin/${BRANCH}" HEAD 2>/dev/null \
+      && ! git merge-base --is-ancestor "origin/${TARGET_BRANCH}" "origin/${BRANCH}" 2>/dev/null; then
+      SKIP_REMOTE_REBASE=true
+      echo "Local HEAD is already based on origin/${TARGET_BRANCH} and has diverged from origin/${BRANCH} (target is ahead of the remote PR tip) — skipping rebase onto origin/${BRANCH} to preserve the agent rebase onto the target"
     fi
-    print_sanitized_gha_log "${REBASE_OUTPUT}"
+    if [ "${SKIP_REMOTE_REBASE}" = "false" ]; then
+      echo "Rebasing local ${BRANCH} onto origin/${BRANCH}..."
+      REBASE_OUTPUT="$(git rebase "origin/${BRANCH}" 2>&1)" && REBASE_RC=0 || REBASE_RC=$?
+      if [ "${REBASE_RC}" -ne 0 ]; then
+        print_sanitized_gha_log "${REBASE_OUTPUT}"
+        git rebase --abort 2>/dev/null || true
+        post_fail_to_pr push-rejected \
+          "Could not rebase local '${BRANCH}' onto origin/${BRANCH}: the remote branch has commits that conflict with the agent's changes. Resolve the conflict on the PR/MR and re-run /fs-fix.
+${REBASE_OUTPUT}"
+      fi
+      print_sanitized_gha_log "${REBASE_OUTPUT}"
+    fi
   elif echo "${FETCH_OUTPUT}" | grep -qi "couldn't find remote ref"; then
     echo "Remote branch ${BRANCH} not found — skipping rebase"
     print_sanitized_gha_log "${FETCH_OUTPUT}"

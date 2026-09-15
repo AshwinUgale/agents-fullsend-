@@ -68,6 +68,16 @@ else
   echo "PASS: bundled-script-does-not-ignore-rebase-failure"
 fi
 
+# Agent rebase onto the target must not be replayed onto the stale remote PR
+# tip (issue #565). The skip is what lets --force-with-lease publish it.
+if ! grep -q 'skipping rebase onto origin/${BRANCH} to preserve the agent rebase onto the target' "${POST_SCRIPT}"; then
+  echo "FAIL: bundled-script-preserves-agent-rebase-onto-target"
+  echo "  ${POST_SCRIPT} missing skip of origin/BRANCH rebase after agent rebase onto target"
+  FAILURES=$((FAILURES + 1))
+else
+  echo "PASS: bundled-script-preserves-agent-rebase-onto-target"
+fi
+
 # ---------------------------------------------------------------------------
 # Test helper — reimplements the push retry logic from post-fix.sh section 5.
 # Given a push exit code and output, returns the action.
@@ -1621,11 +1631,93 @@ MOCKEOF
   echo "PASS: ${test_name}"
 }
 
+# Agent rebased the PR onto a target that has moved past the remote PR tip.
+# post-fix must skip rebase onto origin/BRANCH (which would undo it) and
+# force-push the rebased history (issue #565).
+run_push_rebase_preserves_agent_rebase_onto_target_test() {
+  local test_name="push-rebase-preserves-agent-rebase-onto-target"
+  local base="${PUSH_REBASE_TMPDIR}/${test_name}"
+  mkdir -p "${base}"
+
+  git init -q --bare -b main "${base}/remote.git"
+  git init -q -b main "${base}/seed"
+  push_rebase_ident "${base}/seed"
+  echo "base" > "${base}/seed/file.txt"
+  git -C "${base}/seed" add file.txt
+  git -C "${base}/seed" commit -q -m "init"
+  git -C "${base}/seed" remote add origin "${base}/remote.git"
+  git -C "${base}/seed" push -q -u origin main
+
+  git -C "${base}/seed" checkout -q -b agent/99-test-fix
+  echo "pr-a" > "${base}/seed/file.txt"
+  git -C "${base}/seed" add file.txt
+  git -C "${base}/seed" commit -q -m "pr A"
+  git -C "${base}/seed" push -q -u origin agent/99-test-fix
+
+  git -C "${base}/seed" checkout -q main
+  echo "ahead" > "${base}/seed/other.txt"
+  git -C "${base}/seed" add other.txt
+  git -C "${base}/seed" commit -q -m "main ahead"
+  git -C "${base}/seed" push -q origin main
+  local main_ahead
+  main_ahead="$(git -C "${base}/seed" rev-parse HEAD)"
+
+  git clone -q "${base}/remote.git" "${base}/repo"
+  push_rebase_ident "${base}/repo"
+  git -C "${base}/repo" checkout -q agent/99-test-fix
+  git -C "${base}/repo" rebase -q origin/main
+  echo "fixed" > "${base}/repo/file.txt"
+  git -C "${base}/repo" add file.txt
+  git -C "${base}/repo" commit -q -m "fix: agent change"
+
+  local stdout_log="${PUSH_REBASE_TMPDIR}/stdout-${test_name}.log"
+  local exit_code=0
+  run_push_rebase_postfix "${base}" "${stdout_log}" || exit_code=$?
+
+  if [ "${exit_code}" -ne 0 ]; then
+    echo "FAIL: ${test_name} — exit code ${exit_code}"
+    cat "${stdout_log}"
+    FAILURES=$((FAILURES + 1))
+    return
+  fi
+  if ! grep -q "skipping rebase onto origin/agent/99-test-fix to preserve the agent rebase onto the target" "${stdout_log}"; then
+    echo "FAIL: ${test_name} — expected skip of rebase onto origin/BRANCH"
+    cat "${stdout_log}"
+    FAILURES=$((FAILURES + 1))
+    return
+  fi
+  if ! git --git-dir="${base}/remote.git" merge-base --is-ancestor \
+       "${main_ahead}" refs/heads/agent/99-test-fix; then
+    echo "FAIL: ${test_name} — pushed branch is not based on the new main tip"
+    cat "${stdout_log}"
+    FAILURES=$((FAILURES + 1))
+    return
+  fi
+  local remote_content
+  remote_content="$(git --git-dir="${base}/remote.git" show refs/heads/agent/99-test-fix:file.txt)"
+  if [ "${remote_content}" != "fixed" ]; then
+    echo "FAIL: ${test_name} — remote file.txt is '${remote_content}', want 'fixed'"
+    cat "${stdout_log}"
+    FAILURES=$((FAILURES + 1))
+    return
+  fi
+  local other_content
+  other_content="$(git --git-dir="${base}/remote.git" show refs/heads/agent/99-test-fix:other.txt)"
+  if [ "${other_content}" != "ahead" ]; then
+    echo "FAIL: ${test_name} — remote other.txt is '${other_content}', want 'ahead'"
+    cat "${stdout_log}"
+    FAILURES=$((FAILURES + 1))
+    return
+  fi
+  echo "PASS: ${test_name}"
+}
+
 run_push_rebase_reconstructed_test
 run_push_rebase_matching_history_test
 run_push_rebase_fresh_branch_test
 run_push_rebase_conflict_test
 run_push_rebase_fetch_failure_test
+run_push_rebase_preserves_agent_rebase_onto_target_test
 
 rm -rf "${PUSH_REBASE_TMPDIR}"
 
