@@ -103,6 +103,9 @@ expect_fallback "empty-file" "${TMPDIR}/empty.txt"
 expect_fallback "whitespace-only" "${TMPDIR}/whitespace-only.txt"
 expect_fallback "pointer-pr-1296" "${FIXTURES}/pointer-pr-1296.txt"
 expect_fallback "pointer-no-url" "${FIXTURES}/pointer-no-url.txt"
+# pointer-long is >= 200 bytes so only the pointer-regex clause can trigger
+# fallback. The shorter pointer fixtures also match the length threshold.
+expect_fallback "pointer-long" "${FIXTURES}/pointer-long.txt"
 expect_fallback "short-non-pointer" "${FIXTURES}/short-non-pointer.txt"
 expect_no_fallback "actionable-review" "${FIXTURES}/actionable.txt"
 
@@ -118,6 +121,15 @@ if grep -q 'See the \[review comment\]' "${FIXTURES}/pointer-pr-1296.txt"; then
   pass "pointer-pr-1296-matches-template"
 else
   fail "pointer-pr-1296-matches-template" "fixture is not the PR #1296 pointer sentence"
+fi
+
+# Lock the isolation: if this fixture shrinks below 200 bytes, the length
+# threshold would fire first and the regex clause would again be untested.
+POINTER_LONG_SIZE="$(wc -c < "${FIXTURES}/pointer-long.txt" | tr -d ' ')"
+if [[ "${POINTER_LONG_SIZE}" -ge 200 ]]; then
+  pass "pointer-long-at-least-200"
+else
+  fail "pointer-long-at-least-200" "fixture is ${POINTER_LONG_SIZE} bytes; must be >= 200 to isolate the regex clause"
 fi
 
 if [[ "${FAILURES}" -ne 0 ]]; then
