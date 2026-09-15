@@ -296,7 +296,7 @@ which gitlint &>/dev/null && gitlint --commit HEAD
 }
 ```
 
-**Schema:** `additionalProperties: false`. Use only shown fields. `trigger_source` is `"bot"` or `"human"` (normalized, not raw username). Action types: `fix` (required: `type`, `finding`, `description`) or `disagree` (required: `type`, `finding`, `reason`). Top-level required: `pr_number`, `trigger_source`, `actions`, `summary`, `tests_passed`, `files_changed`. Actions array must have ≥1 item.
+**Schema:** `additionalProperties: false`. Use only schema-defined fields — e.g. optional `rebased_onto_target` (`agents/fix.md` step 8). `trigger_source` is `"bot"`/`"human"` (normalized). Types: `fix` (needs `type`, `finding`, `description`) or `disagree` (needs `type`, `finding`, `reason`). Required: `pr_number`, `trigger_source`, `actions` (≥1 item), `summary`, `tests_passed`, `files_changed`.
 
 Validate: `fullsend-check-output "${FULLSEND_OUTPUT_DIR}/agent-result.json"`. If fails after 3 attempts, write best JSON and exit.
 

@@ -403,8 +403,19 @@ if [ "${NO_PUSH}" = "false" ]; then
     # checks stay as a secondary guard: GitLab reconstruction of an
     # up-to-date PR does not match (target is still an ancestor of
     # origin/BRANCH), so issue #1228 is unchanged.
+    #
+    # AGENT_REBASED_ONTO_TARGET alone is not sufficient: agent-result.json is
+    # written inside the sandbox, which is influenceable by prompt injection
+    # in PR/issue text or a confused agent. agents/fix.md only prompt-instructs
+    # the agent never to set this field on a bot-triggered run — that is not
+    # an enforced control. TRIGGER_SOURCE, by contrast, is a harness-set env
+    # var the sandbox does not control, and a genuine rebase is never
+    # performed on a bot-triggered run (see "Rebase onto the target branch"
+    # in agents/fix.md). Require a non-bot trigger in addition to the agent's
+    # self-attestation before trusting it.
     SKIP_REMOTE_REBASE=false
     if [ "${AGENT_REBASED_ONTO_TARGET}" = "true" ] \
+      && ! is_bot_user "${TRIGGER_SOURCE}" \
       && git rev-parse --verify "origin/${TARGET_BRANCH}" >/dev/null 2>&1 \
       && git merge-base --is-ancestor "origin/${TARGET_BRANCH}" HEAD 2>/dev/null \
       && ! git merge-base --is-ancestor "origin/${BRANCH}" HEAD 2>/dev/null \

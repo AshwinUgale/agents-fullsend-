@@ -178,14 +178,31 @@ rebase request.
 7. After a successful rebase, further code fixes land as **new commits**
    on the rebased history. Do not amend rebased commits. A rebase-only
    run needs no extra commit — the rewritten commits are the result.
-8. Only once step 4 (or the conflict resolution in step 5) finishes
-   successfully, set the top-level `rebased_onto_target: true` field in
-   `agent-result.json`. This is the only signal the post-script trusts to
-   skip replaying local commits onto the stale remote PR tip — ancestry
-   alone can't tell a real rebase apart from a GitLab MR reconstruction
-   against a target that has since moved on. Never set this field for the
-   step-3 no-op, a failed/aborted rebase, or a bot-triggered run — a wrong
-   `true` here makes the post-script force-push over real remote commits.
+8. Set the top-level `rebased_onto_target: true` field in `agent-result.json`
+   whenever this run's HEAD reflects a human-requested rebase onto the
+   target that still needs to be published on the remote PR — not only in
+   the same iteration that `git rebase` executes. This is the only signal
+   the post-script trusts to skip replaying local commits onto the stale
+   remote PR tip — ancestry alone can't tell a real rebase apart from a
+   GitLab MR reconstruction against a target that has since moved on.
+   Concretely:
+   - Set it once step 4 (or the conflict resolution in step 5) finishes
+     successfully.
+   - Set it on the step-3 no-op too, if HEAD is based on the target but has
+     diverged from the real remote PR tip (this happens when the sandbox
+     reconstructed the branch from the target, e.g. GitLab) — the rebase's
+     effect still needs publishing even though no `git rebase` command ran
+     this iteration. Do not set it when HEAD already matches the remote PR
+     tip; there is nothing new to publish.
+   - On a validation-loop retry that rewrites `agent-result.json` without
+     re-running `git rebase` (see "Validation retry behavior" below), carry
+     this field forward from the iteration that performed (or no-op'd) the
+     rebase if its result still needs publishing.
+   - Never set this field for a failed/aborted rebase or a bot-triggered
+     run — bot-triggered runs never rebase, and the post-script now also
+     refuses to trust a `true` value unless `TRIGGER_SOURCE` is human. A
+     wrong `true` here makes the post-script force-push over real remote
+     commits.
 
 A rebase rewrites commit SHAs. That rewrite is the only allowed exception
 to "create a new commit; do not amend." It does not authorize
@@ -269,6 +286,14 @@ On a validation retry:
   changes. The `fix-review` skill's "follow these steps in order" applies to a
   first iteration; on a validation retry, correcting the reported failure is
   the whole job.
+- If a prior iteration in this run set `rebased_onto_target: true` (see "How
+  to rebase" step 8) and that rebase's result still needs publishing, carry
+  the field forward into this iteration's `agent-result.json` even though
+  you are not re-running `git rebase`. The runner clears the output
+  directory between iterations, so a rewritten `agent-result.json` that
+  drops the field is indistinguishable from a run that never rebased — the
+  post-script fails closed and replays local commits onto the stale remote
+  PR tip, silently undoing the rebase.
 
 ## Detailed fix procedure
 

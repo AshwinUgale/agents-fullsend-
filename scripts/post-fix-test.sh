@@ -95,6 +95,19 @@ else
   echo "PASS: bundled-script-gates-rebase-skip-on-agent-result"
 fi
 
+# agent-result.json is sandbox-written and attacker-influenceable (prompt
+# injection, a confused agent). rebased_onto_target alone must not be
+# trusted to skip the origin/BRANCH rebase — require the harness-set
+# TRIGGER_SOURCE to also indicate a human trigger, since a genuine rebase
+# never happens on a bot-triggered run (see review on PR #1296).
+if ! grep -q '! is_bot_user "${TRIGGER_SOURCE}"' "${POST_SCRIPT}"; then
+  echo "FAIL: bundled-script-requires-non-bot-trigger-for-rebase-skip"
+  echo "  ${POST_SCRIPT} does not gate the origin/BRANCH-rebase skip on a non-bot TRIGGER_SOURCE"
+  FAILURES=$((FAILURES + 1))
+else
+  echo "PASS: bundled-script-requires-non-bot-trigger-for-rebase-skip"
+fi
+
 # ---------------------------------------------------------------------------
 # Test helper — reimplements the push retry logic from post-fix.sh section 5.
 # Given a push exit code and output, returns the action.
@@ -1305,6 +1318,7 @@ run_push_rebase_postfix() {
   local run_dir="$1"
   local stdout_log="$2"
   local mock_bin="${3:-${PUSH_REBASE_MOCK_BIN}}"
+  local trigger_source="${4:-test-user}"
   local exit_code=0
   # shellcheck disable=SC2030,SC2031
   (
@@ -1313,7 +1327,7 @@ run_push_rebase_postfix() {
     export PUSH_TOKEN="fake-token"
     export REPO_FULL_NAME="test-org/test-repo"
     export PR_NUMBER="99"
-    export TRIGGER_SOURCE="test-user"
+    export TRIGGER_SOURCE="${trigger_source}"
     export REPO_DIR="repo"
     export FULLSEND_FORGE="github"
     export TARGET_BRANCH="main"
@@ -1751,6 +1765,102 @@ JSONEOF
   echo "PASS: ${test_name}"
 }
 
+# agent-result.json's rebased_onto_target is written inside the sandbox and
+# is attacker-influenceable (prompt injection, a confused agent). A
+# bot-triggered run never legitimately performs a human rebase (see
+# agents/fix.md's "Rebase onto the target branch"), so the skip must not
+# trust rebased_onto_target:true when TRIGGER_SOURCE is a bot — even though
+# the ancestry conditions match (high-severity finding on PR #1296). Reuses
+# the exact topology from run_push_rebase_reconstructed_target_advanced_test
+# (an ordinary stale-PR reconstruction with no real rebase performed) to
+# prove the marker alone — without a human trigger — cannot force the skip.
+run_push_rebase_bot_trigger_ignores_marker_test() {
+  local test_name="push-rebase-bot-trigger-ignores-marker"
+  local base="${PUSH_REBASE_TMPDIR}/${test_name}"
+  mkdir -p "${base}"
+
+  git init -q --bare -b main "${base}/remote.git"
+  git init -q -b main "${base}/seed"
+  push_rebase_ident "${base}/seed"
+  echo "base" > "${base}/seed/file.txt"
+  git -C "${base}/seed" add file.txt
+  git -C "${base}/seed" commit -q -m "init"
+  git -C "${base}/seed" remote add origin "${base}/remote.git"
+  git -C "${base}/seed" push -q -u origin main
+
+  git -C "${base}/seed" checkout -q -b agent/99-test-fix
+  echo "pr-a" > "${base}/seed/file.txt"
+  git -C "${base}/seed" add file.txt
+  git -C "${base}/seed" commit -q -m "real A"
+  git -C "${base}/seed" push -q -u origin agent/99-test-fix
+  local real_a
+  real_a="$(git -C "${base}/seed" rev-parse HEAD)"
+
+  git -C "${base}/seed" checkout -q main
+  echo "ahead" > "${base}/seed/other.txt"
+  git -C "${base}/seed" add other.txt
+  git -C "${base}/seed" commit -q -m "main ahead"
+  git -C "${base}/seed" push -q origin main
+
+  git clone -q "${base}/remote.git" "${base}/repo"
+  push_rebase_ident "${base}/repo"
+  git -C "${base}/repo" checkout -q -B agent/99-test-fix origin/main
+  echo "pr-a" > "${base}/repo/file.txt"
+  git -C "${base}/repo" add file.txt
+  git -C "${base}/repo" commit -q -m "reconstructed A"
+  echo "fixed" > "${base}/repo/file.txt"
+  git -C "${base}/repo" add file.txt
+  git -C "${base}/repo" commit -q -m "fix: agent change"
+
+  # A bot-triggered run cannot have legitimately performed the rebase this
+  # field claims — the marker must be ignored regardless of its value.
+  mkdir -p "${base}/iteration-1/output"
+  cat > "${base}/iteration-1/output/agent-result.json" <<'JSONEOF'
+{
+  "pr_number": 99,
+  "trigger_source": "bot",
+  "actions": [
+    {"type": "fix", "finding": "unrelated review finding", "description": "some fix"}
+  ],
+  "summary": "Bot-triggered fix run.",
+  "tests_passed": true,
+  "files_changed": [],
+  "rebased_onto_target": true
+}
+JSONEOF
+
+  local stdout_log="${PUSH_REBASE_TMPDIR}/stdout-${test_name}.log"
+  local exit_code=0
+  run_push_rebase_postfix "${base}" "${stdout_log}" "${PUSH_REBASE_MOCK_BIN}" "fullsend-ai-review[bot]" || exit_code=$?
+
+  if [ "${exit_code}" -ne 0 ]; then
+    echo "FAIL: ${test_name} — exit code ${exit_code}"
+    cat "${stdout_log}"
+    FAILURES=$((FAILURES + 1))
+    return
+  fi
+  if grep -q "skipping rebase onto origin/agent/99-test-fix" "${stdout_log}"; then
+    echo "FAIL: ${test_name} — trusted rebased_onto_target:true from a bot-triggered run"
+    cat "${stdout_log}"
+    FAILURES=$((FAILURES + 1))
+    return
+  fi
+  if ! grep -q "Branch agent/99-test-fix pushed successfully" "${stdout_log}"; then
+    echo "FAIL: ${test_name} — push did not report success"
+    cat "${stdout_log}"
+    FAILURES=$((FAILURES + 1))
+    return
+  fi
+  if ! git --git-dir="${base}/remote.git" merge-base --is-ancestor \
+       "${real_a}" refs/heads/agent/99-test-fix; then
+    echo "FAIL: ${test_name} — remote tip is not a fast-forward of real A (history was replaced instead of fast-forwarded)"
+    git --git-dir="${base}/remote.git" log --oneline refs/heads/agent/99-test-fix
+    FAILURES=$((FAILURES + 1))
+    return
+  fi
+  echo "PASS: ${test_name}"
+}
+
 # Untested combination of the #1228 and #565 fixtures (per review on PR #1296):
 # a GitLab-style reconstruction (branch rebuilt from API content on top of
 # the *current* target tip, per run_push_rebase_reconstructed_test) where the
@@ -1844,6 +1954,110 @@ run_push_rebase_reconstructed_target_advanced_test() {
   echo "PASS: ${test_name}"
 }
 
+# Validation-loop retry (per review on PR #1296): the rebase happens in an
+# earlier iteration and the marker is set there, then a later iteration
+# rewrites agent-result.json (e.g. to fix a schema violation) without
+# redoing `git rebase` — agents/fix.md now instructs the agent to carry
+# rebased_onto_target forward in that later file rather than drop it. The
+# backward-compat scan in post-fix.src.sh picks the *last* iteration-N/output
+# directory found, so the final agent-result.json (the retry's) is what must
+# still carry the marker for the skip to fire.
+run_push_rebase_preserves_agent_rebase_after_validation_retry_test() {
+  local test_name="push-rebase-preserves-agent-rebase-after-validation-retry"
+  local base="${PUSH_REBASE_TMPDIR}/${test_name}"
+  mkdir -p "${base}"
+
+  git init -q --bare -b main "${base}/remote.git"
+  git init -q -b main "${base}/seed"
+  push_rebase_ident "${base}/seed"
+  echo "base" > "${base}/seed/file.txt"
+  git -C "${base}/seed" add file.txt
+  git -C "${base}/seed" commit -q -m "init"
+  git -C "${base}/seed" remote add origin "${base}/remote.git"
+  git -C "${base}/seed" push -q -u origin main
+
+  git -C "${base}/seed" checkout -q -b agent/99-test-fix
+  echo "pr-a" > "${base}/seed/file.txt"
+  git -C "${base}/seed" add file.txt
+  git -C "${base}/seed" commit -q -m "pr A"
+  git -C "${base}/seed" push -q -u origin agent/99-test-fix
+
+  git -C "${base}/seed" checkout -q main
+  echo "ahead" > "${base}/seed/other.txt"
+  git -C "${base}/seed" add other.txt
+  git -C "${base}/seed" commit -q -m "main ahead"
+  git -C "${base}/seed" push -q origin main
+  local main_ahead
+  main_ahead="$(git -C "${base}/seed" rev-parse HEAD)"
+
+  git clone -q "${base}/remote.git" "${base}/repo"
+  push_rebase_ident "${base}/repo"
+  git -C "${base}/repo" checkout -q agent/99-test-fix
+  git -C "${base}/repo" rebase -q origin/main
+  echo "fixed" > "${base}/repo/file.txt"
+  git -C "${base}/repo" add file.txt
+  git -C "${base}/repo" commit -q -m "fix: agent change"
+
+  # iteration-1: the run that actually executed the rebase and recorded it.
+  mkdir -p "${base}/iteration-1/output"
+  cat > "${base}/iteration-1/output/agent-result.json" <<'JSONEOF'
+{
+  "pr_number": 99,
+  "trigger_source": "human",
+  "actions": [
+    {"type": "fix", "finding": "rebase onto main", "description": "Rebased the branch onto origin/main per the human /fs-fix rebase request."}
+  ],
+  "summary": "Rebased onto main.",
+  "tests_passed": true,
+  "files_changed": [],
+  "rebased_onto_target": true
+}
+JSONEOF
+
+  # iteration-2: a validation-loop retry in the same run that rewrote
+  # agent-result.json (e.g. after a schema-validation failure) without
+  # redoing `git rebase` — the marker must be carried forward here too.
+  mkdir -p "${base}/iteration-2/output"
+  cat > "${base}/iteration-2/output/agent-result.json" <<'JSONEOF'
+{
+  "pr_number": 99,
+  "trigger_source": "human",
+  "actions": [
+    {"type": "fix", "finding": "rebase onto main", "description": "Rebased the branch onto origin/main per the human /fs-fix rebase request."}
+  ],
+  "summary": "Rebased onto main.",
+  "tests_passed": true,
+  "files_changed": [],
+  "rebased_onto_target": true
+}
+JSONEOF
+
+  local stdout_log="${PUSH_REBASE_TMPDIR}/stdout-${test_name}.log"
+  local exit_code=0
+  run_push_rebase_postfix "${base}" "${stdout_log}" || exit_code=$?
+
+  if [ "${exit_code}" -ne 0 ]; then
+    echo "FAIL: ${test_name} — exit code ${exit_code}"
+    cat "${stdout_log}"
+    FAILURES=$((FAILURES + 1))
+    return
+  fi
+  if ! grep -q "skipping rebase onto origin/agent/99-test-fix to preserve the agent rebase onto the target" "${stdout_log}"; then
+    echo "FAIL: ${test_name} — expected skip of rebase onto origin/BRANCH using the retry's agent-result.json"
+    cat "${stdout_log}"
+    FAILURES=$((FAILURES + 1))
+    return
+  fi
+  if ! git --git-dir="${base}/remote.git" merge-base --is-ancestor \
+       "${main_ahead}" refs/heads/agent/99-test-fix; then
+    echo "FAIL: ${test_name} — pushed branch is not based on the new main tip"
+    cat "${stdout_log}"
+    FAILURES=$((FAILURES + 1))
+    return
+  fi
+  echo "PASS: ${test_name}"
+}
+
 run_push_rebase_reconstructed_test
 run_push_rebase_matching_history_test
 run_push_rebase_fresh_branch_test
@@ -1851,6 +2065,8 @@ run_push_rebase_conflict_test
 run_push_rebase_fetch_failure_test
 run_push_rebase_preserves_agent_rebase_onto_target_test
 run_push_rebase_reconstructed_target_advanced_test
+run_push_rebase_bot_trigger_ignores_marker_test
+run_push_rebase_preserves_agent_rebase_after_validation_retry_test
 
 rm -rf "${PUSH_REBASE_TMPDIR}"
 
