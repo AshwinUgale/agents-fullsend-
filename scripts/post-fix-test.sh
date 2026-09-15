@@ -78,6 +78,23 @@ else
   echo "PASS: bundled-script-preserves-agent-rebase-onto-target"
 fi
 
+# Branch ancestry alone can't distinguish an authorized agent rebase from a
+# GitLab MR reconstruction against a target that has since moved on — both
+# produce the same topology (see push-rebase-reconstructed-target-advanced-no-marker
+# below). The skip must additionally require agent-result.json's own record
+# of having run the rebase, read via jq before the skip's if-condition.
+if ! grep -q "AGENT_REBASED_ONTO_TARGET=\"\$(jq -r 'if .rebased_onto_target == true then \"true\" else \"false\" end'" "${POST_SCRIPT}"; then
+  echo "FAIL: bundled-script-gates-rebase-skip-on-agent-result"
+  echo "  ${POST_SCRIPT} does not read rebased_onto_target from agent-result.json"
+  FAILURES=$((FAILURES + 1))
+elif ! grep -q 'if \[ "${AGENT_REBASED_ONTO_TARGET}" = "true" \]' "${POST_SCRIPT}"; then
+  echo "FAIL: bundled-script-gates-rebase-skip-on-agent-result"
+  echo "  ${POST_SCRIPT} does not gate the origin/BRANCH-rebase skip on AGENT_REBASED_ONTO_TARGET"
+  FAILURES=$((FAILURES + 1))
+else
+  echo "PASS: bundled-script-gates-rebase-skip-on-agent-result"
+fi
+
 # ---------------------------------------------------------------------------
 # Test helper — reimplements the push retry logic from post-fix.sh section 5.
 # Given a push exit code and output, returns the action.
@@ -1300,6 +1317,10 @@ run_push_rebase_postfix() {
     export REPO_DIR="repo"
     export FULLSEND_FORGE="github"
     export TARGET_BRANCH="main"
+    # Needed only when a test fixture provides an iteration-N/output/agent-result.json
+    # (process-fix-result.py requires it once jsonschema is importable); harmless
+    # for the tests here that never populate that file.
+    export FULLSEND_OUTPUT_SCHEMA="${SCRIPT_DIR}/../schemas/fix-result.schema.json"
     bash "${POST_SCRIPT}"
   ) > "${stdout_log}" 2>&1 || exit_code=$?
   return "${exit_code}"
@@ -1670,6 +1691,24 @@ run_push_rebase_preserves_agent_rebase_onto_target_test() {
   git -C "${base}/repo" add file.txt
   git -C "${base}/repo" commit -q -m "fix: agent change"
 
+  # The skip is gated on the agent's own record of having run the rebase
+  # (issue #565 remediation) — ancestry alone is not trusted. Without this
+  # file present with rebased_onto_target:true, the skip must not fire.
+  mkdir -p "${base}/iteration-1/output"
+  cat > "${base}/iteration-1/output/agent-result.json" <<'JSONEOF'
+{
+  "pr_number": 99,
+  "trigger_source": "human",
+  "actions": [
+    {"type": "fix", "finding": "rebase onto main", "description": "Rebased the branch onto origin/main per the human /fs-fix rebase request."}
+  ],
+  "summary": "Rebased onto main.",
+  "tests_passed": true,
+  "files_changed": [],
+  "rebased_onto_target": true
+}
+JSONEOF
+
   local stdout_log="${PUSH_REBASE_TMPDIR}/stdout-${test_name}.log"
   local exit_code=0
   run_push_rebase_postfix "${base}" "${stdout_log}" || exit_code=$?
@@ -1712,12 +1751,106 @@ run_push_rebase_preserves_agent_rebase_onto_target_test() {
   echo "PASS: ${test_name}"
 }
 
+# Untested combination of the #1228 and #565 fixtures (per review on PR #1296):
+# a GitLab-style reconstruction (branch rebuilt from API content on top of
+# the *current* target tip, per run_push_rebase_reconstructed_test) where the
+# target has since advanced past the commit the real remote PR branch was
+# built from. No agent-result.json is present — no rebase was ever requested
+# or performed — so this must NOT match the "agent rebased onto target" skip.
+# Before the #565 remediation, ancestry alone made this indistinguishable
+# from an authorized rebase: it would skip the origin/BRANCH rebase and
+# force-push, replacing the real remote branch's history instead of
+# fast-forwarding it (reintroducing the #1228 regression). The fix agent
+# must fast-forward onto the real remote tip like any other stale-PR case.
+run_push_rebase_reconstructed_target_advanced_test() {
+  local test_name="push-rebase-reconstructed-target-advanced-no-marker"
+  local base="${PUSH_REBASE_TMPDIR}/${test_name}"
+  mkdir -p "${base}"
+
+  git init -q --bare -b main "${base}/remote.git"
+  git init -q -b main "${base}/seed"
+  push_rebase_ident "${base}/seed"
+  echo "base" > "${base}/seed/file.txt"
+  git -C "${base}/seed" add file.txt
+  git -C "${base}/seed" commit -q -m "init"
+  git -C "${base}/seed" remote add origin "${base}/remote.git"
+  git -C "${base}/seed" push -q -u origin main
+
+  git -C "${base}/seed" checkout -q -b agent/99-test-fix
+  echo "pr-a" > "${base}/seed/file.txt"
+  git -C "${base}/seed" add file.txt
+  git -C "${base}/seed" commit -q -m "real A"
+  git -C "${base}/seed" push -q -u origin agent/99-test-fix
+  local real_a
+  real_a="$(git -C "${base}/seed" rev-parse HEAD)"
+
+  # Target moves on after the real remote PR branch was built — the
+  # ordinary "stale PR" case that #1228's fast-forward fix exists for.
+  git -C "${base}/seed" checkout -q main
+  echo "ahead" > "${base}/seed/other.txt"
+  git -C "${base}/seed" add other.txt
+  git -C "${base}/seed" commit -q -m "main ahead"
+  git -C "${base}/seed" push -q origin main
+
+  git clone -q "${base}/remote.git" "${base}/repo"
+  push_rebase_ident "${base}/repo"
+  # Reconstruct from the now-advanced main: same tree as A, different SHA,
+  # then the agent fix. No rebase was requested or run — no agent-result.json
+  # is written for this test.
+  git -C "${base}/repo" checkout -q -B agent/99-test-fix origin/main
+  echo "pr-a" > "${base}/repo/file.txt"
+  git -C "${base}/repo" add file.txt
+  git -C "${base}/repo" commit -q -m "reconstructed A"
+  echo "fixed" > "${base}/repo/file.txt"
+  git -C "${base}/repo" add file.txt
+  git -C "${base}/repo" commit -q -m "fix: agent change"
+
+  local stdout_log="${PUSH_REBASE_TMPDIR}/stdout-${test_name}.log"
+  local exit_code=0
+  run_push_rebase_postfix "${base}" "${stdout_log}" || exit_code=$?
+
+  if [ "${exit_code}" -ne 0 ]; then
+    echo "FAIL: ${test_name} — exit code ${exit_code}"
+    cat "${stdout_log}"
+    FAILURES=$((FAILURES + 1))
+    return
+  fi
+  if grep -q "skipping rebase onto origin/agent/99-test-fix" "${stdout_log}"; then
+    echo "FAIL: ${test_name} — incorrectly skipped rebase onto origin/BRANCH with no rebase marker present"
+    cat "${stdout_log}"
+    FAILURES=$((FAILURES + 1))
+    return
+  fi
+  if ! grep -q "Branch agent/99-test-fix pushed successfully" "${stdout_log}"; then
+    echo "FAIL: ${test_name} — push did not report success"
+    cat "${stdout_log}"
+    FAILURES=$((FAILURES + 1))
+    return
+  fi
+  if ! git --git-dir="${base}/remote.git" merge-base --is-ancestor \
+       "${real_a}" refs/heads/agent/99-test-fix; then
+    echo "FAIL: ${test_name} — remote tip is not a fast-forward of real A (history was replaced instead of fast-forwarded)"
+    git --git-dir="${base}/remote.git" log --oneline refs/heads/agent/99-test-fix
+    FAILURES=$((FAILURES + 1))
+    return
+  fi
+  local remote_content
+  remote_content="$(git --git-dir="${base}/remote.git" show refs/heads/agent/99-test-fix:file.txt)"
+  if [ "${remote_content}" != "fixed" ]; then
+    echo "FAIL: ${test_name} — remote file.txt is '${remote_content}', want 'fixed'"
+    FAILURES=$((FAILURES + 1))
+    return
+  fi
+  echo "PASS: ${test_name}"
+}
+
 run_push_rebase_reconstructed_test
 run_push_rebase_matching_history_test
 run_push_rebase_fresh_branch_test
 run_push_rebase_conflict_test
 run_push_rebase_fetch_failure_test
 run_push_rebase_preserves_agent_rebase_onto_target_test
+run_push_rebase_reconstructed_target_advanced_test
 
 rm -rf "${PUSH_REBASE_TMPDIR}"
 

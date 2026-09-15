@@ -115,6 +115,10 @@
       "maxItems": 100,
       "items": { "type": "string", "maxLength": 512 },
       "description": "List of files modified by the fix agent."
+    },
+    "rebased_onto_target": {
+      "type": "boolean",
+      "description": "Set to true only after this run actually executed `git rebase origin/<target>` to completion (the 'How to rebase' procedure in agents/fix.md), never inferred. The post-script trusts this as the sole signal that local history was rewritten by an authorized human rebase request — ancestry alone cannot distinguish that from a GitLab MR reconstruction against a target that has since moved on."
     }
   }
 }

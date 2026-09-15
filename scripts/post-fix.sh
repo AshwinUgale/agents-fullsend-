@@ -1644,6 +1644,52 @@ if [ "${NO_PUSH}" = "false" ]; then
   fi
 fi
 
+# Find agent-result.json — prefer the validated iteration when set.
+# RUN_DIR is the original cwd (runDir = <outputBase>/<sandboxName>), saved
+# before we cd'd into REPO_DIR. The agent writes its structured output to
+# iteration-<N>/output/agent-result.json within runDir.
+#
+# Trust boundary: FULLSEND_VALIDATED_ITERATION_DIR is set by the fullsend CLI
+# on the runner — not by the sandbox or the agent. No containment check
+# (realpath / prefix guard) is applied here; the value is trusted from the
+# external harness. If the trust model changes, add a realpath prefix check.
+#
+# Located here (before the push section) rather than down in "5. Process
+# structured output" because the rebase-skip check below needs
+# rebased_onto_target from this same file — see issue #565.
+if [ -n "${FULLSEND_VALIDATED_ITERATION_DIR:-}" ]; then
+  if [ -f "${FULLSEND_VALIDATED_ITERATION_DIR}/agent-result.json" ]; then
+    RESULT_FILE="${FULLSEND_VALIDATED_ITERATION_DIR}/agent-result.json"
+  else
+    gha_echo error "FULLSEND_VALIDATED_ITERATION_DIR is set but does not contain agent-result.json"
+    exit 1
+  fi
+else
+  # Backward compatibility: scan iteration-N/ subdirectories for the last
+  # iteration's output (glob order = naturally ascending iteration numbers).
+  RESULT_FILE=""
+  for dir in "${RUN_DIR}"/iteration-*/output; do
+    if [ -f "${dir}/agent-result.json" ]; then
+      RESULT_FILE="${dir}/agent-result.json"
+    fi
+  done
+fi
+
+# Did this run's fix agent actually execute `git rebase origin/<target>` to
+# completion (agents/fix.md's "How to rebase" step 4/5, human-requested only)?
+# Read straight from agent-result.json rather than inferring from branch
+# topology: a GitLab MR reconstruction produces the exact same ancestry
+# (target branch reachable from HEAD, HEAD diverged from the real remote PR
+# tip) whenever the target has moved past the commit the remote branch was
+# built from — the ordinary "stale PR" case — with no rebase ever requested.
+# jq failures (missing file, invalid JSON, field absent) all fall through to
+# "false", the fail-closed default — see issue #565.
+AGENT_REBASED_ONTO_TARGET=false
+if [ -n "${RESULT_FILE}" ] && [ -f "${RESULT_FILE}" ]; then
+  AGENT_REBASED_ONTO_TARGET="$(jq -r 'if .rebased_onto_target == true then "true" else "false" end' "${RESULT_FILE}" 2>/dev/null || echo false)"
+  [ "${AGENT_REBASED_ONTO_TARGET}" = "true" ] || AGENT_REBASED_ONTO_TARGET=false
+fi
+
 # ---------------------------------------------------------------------------
 # 4. Push branch (only if we have commits)
 # ---------------------------------------------------------------------------
@@ -1667,12 +1713,18 @@ if [ "${NO_PUSH}" = "false" ]; then
     print_sanitized_gha_log "${FETCH_OUTPUT}"
     # If the agent already rebased onto the PR target (issue #565), replaying
     # local commits onto the stale remote PR tip would undo that rebase.
-    # Detect: HEAD is based on origin/TARGET_BRANCH, has diverged from
-    # origin/BRANCH, and the target itself has moved past the remote PR tip.
-    # GitLab reconstruction of an up-to-date PR does not match (target is
-    # still an ancestor of origin/BRANCH), so issue #1228 is unchanged.
+    # Require the agent's own record of having run the rebase
+    # (AGENT_REBASED_ONTO_TARGET, computed above from agent-result.json) —
+    # ancestry alone cannot be trusted here; a GitLab MR reconstruction built
+    # against a target that has since moved on produces this same topology
+    # (HEAD based on origin/TARGET_BRANCH, diverged from origin/BRANCH, target
+    # ahead of the remote PR tip) with no rebase ever requested. The ancestry
+    # checks stay as a secondary guard: GitLab reconstruction of an
+    # up-to-date PR does not match (target is still an ancestor of
+    # origin/BRANCH), so issue #1228 is unchanged.
     SKIP_REMOTE_REBASE=false
-    if git rev-parse --verify "origin/${TARGET_BRANCH}" >/dev/null 2>&1 \
+    if [ "${AGENT_REBASED_ONTO_TARGET}" = "true" ] \
+      && git rev-parse --verify "origin/${TARGET_BRANCH}" >/dev/null 2>&1 \
       && git merge-base --is-ancestor "origin/${TARGET_BRANCH}" HEAD 2>/dev/null \
       && ! git merge-base --is-ancestor "origin/${BRANCH}" HEAD 2>/dev/null \
       && ! git merge-base --is-ancestor "origin/${TARGET_BRANCH}" "origin/${BRANCH}" 2>/dev/null; then
@@ -1749,32 +1801,8 @@ if [ ! -f "${PROCESS_SCRIPT}" ]; then
   fi
 fi
 
-# Find agent-result.json — prefer the validated iteration when set.
-# RUN_DIR is the original cwd (runDir = <outputBase>/<sandboxName>), saved
-# before we cd'd into REPO_DIR. The agent writes its structured output to
-# iteration-<N>/output/agent-result.json within runDir.
-#
-# Trust boundary: FULLSEND_VALIDATED_ITERATION_DIR is set by the fullsend CLI
-# on the runner — not by the sandbox or the agent. No containment check
-# (realpath / prefix guard) is applied here; the value is trusted from the
-# external harness. If the trust model changes, add a realpath prefix check.
-if [ -n "${FULLSEND_VALIDATED_ITERATION_DIR:-}" ]; then
-  if [ -f "${FULLSEND_VALIDATED_ITERATION_DIR}/agent-result.json" ]; then
-    RESULT_FILE="${FULLSEND_VALIDATED_ITERATION_DIR}/agent-result.json"
-  else
-    gha_echo error "FULLSEND_VALIDATED_ITERATION_DIR is set but does not contain agent-result.json"
-    exit 1
-  fi
-else
-  # Backward compatibility: scan iteration-N/ subdirectories for the last
-  # iteration's output (glob order = naturally ascending iteration numbers).
-  RESULT_FILE=""
-  for dir in "${RUN_DIR}"/iteration-*/output; do
-    if [ -f "${dir}/agent-result.json" ]; then
-      RESULT_FILE="${dir}/agent-result.json"
-    fi
-  done
-fi
+# RESULT_FILE was already located above (before section 4) so the rebase-skip
+# check could consult rebased_onto_target — see issue #565.
 
 # The summary comment normally carries the strip note; when it is skipped, post
 # the note on its own so the rewrite still leaves a trace on the PR.

@@ -178,6 +178,14 @@ rebase request.
 7. After a successful rebase, further code fixes land as **new commits**
    on the rebased history. Do not amend rebased commits. A rebase-only
    run needs no extra commit — the rewritten commits are the result.
+8. Only once step 4 (or the conflict resolution in step 5) finishes
+   successfully, set the top-level `rebased_onto_target: true` field in
+   `agent-result.json`. This is the only signal the post-script trusts to
+   skip replaying local commits onto the stale remote PR tip — ancestry
+   alone can't tell a real rebase apart from a GitLab MR reconstruction
+   against a target that has since moved on. Never set this field for the
+   step-3 no-op, a failed/aborted rebase, or a bot-triggered run — a wrong
+   `true` here makes the post-script force-push over real remote commits.
 
 A rebase rewrites commit SHAs. That rewrite is the only allowed exception
 to "create a new commit; do not amend." It does not authorize
