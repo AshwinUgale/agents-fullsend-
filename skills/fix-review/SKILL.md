@@ -110,12 +110,12 @@ The workflow pre-fetches the review body to `/sandbox/workspace/review-body.txt`
 
 ```bash
 REVIEW_BODY_FILE="/sandbox/workspace/review-body.txt"
-[ -s "${REVIEW_BODY_FILE}" ] || echo "::error::No review body found"
+[ -s "${REVIEW_BODY_FILE}" ] || echo "::warning::No review body — trying API fallback"
 cat "${REVIEW_BODY_FILE}"
 ```
 
-Use this pre-fetched file as the review source. Do not re-fetch the review through
-the forge API; the sandbox token may not have permission to read review details.
+If empty or newline-only, recover via overlay Review findings fallback. Do not
+re-fetch PR reviews. If still empty, log error or disagree.
 
 **Step 2b — Understand the review before acting:**
 
@@ -125,7 +125,7 @@ Read the entire review carefully. Identify: (1) the reviewer's overall concern, 
 
 For each finding, record: `finding`, `path`, `description`, `related_findings`. Ignore `<details>` blocks (prior iterations). Inline PR comments are not used; humans direct fixes via `/fs-fix`.
 
-**If trigger type is `"human"`:** Use `HUMAN_INSTRUCTION` as primary directive. If vague, infer conservatively from PR diff.
+**If trigger type is `"human"`:** Use `HUMAN_INSTRUCTION` as primary directive. If empty or vague, also follow step 2a.
 
 ### 3. Discover repo conventions
 
