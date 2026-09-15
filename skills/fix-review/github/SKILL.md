@@ -30,11 +30,13 @@ gh pr diff "${PR_NUMBER}"
 ## Review findings fallback
 
 The review bot posts findings as an issue comment marked
-`<!-- fullsend:review-agent -->`, not as a PR review body. COMMENT
-reviews contain only a pointer to that comment. When
-`/sandbox/workspace/review-body.txt` is empty or whitespace-only, fetch
-the latest matching issue comment. Use jq `last` (not `tail -1`) because
-comment bodies contain newlines.
+`<!-- fullsend:review-agent -->`, not as a PR review body. COMMENT and
+CHANGES_REQUESTED reviews write a pointer into the formal review body
+("See the [review comment](...) for full details."). When
+`/sandbox/workspace/review-body.txt` is empty, whitespace-only,
+pointer-only, or under 200 bytes, fetch the latest matching issue
+comment. Use jq `last` (not `tail -1`) because comment bodies contain
+newlines.
 
 On bot-triggered runs, `TRIGGER_SOURCE` is the review bot's exact login,
 so match it directly instead of the broader `-review[bot]` suffix. On
@@ -43,7 +45,9 @@ bot's login, so keep the suffix match there.
 
 ```bash
 REVIEW_BODY_FILE="/sandbox/workspace/review-body.txt"
-if [ ! -s "${REVIEW_BODY_FILE}" ] || ! grep -q '[^[:space:]]' "${REVIEW_BODY_FILE}"; then
+if [ ! -s "${REVIEW_BODY_FILE}" ] || ! grep -q '[^[:space:]]' "${REVIEW_BODY_FILE}" ||
+   grep -qxE 'See the .*review comment.*for full details\.?' "${REVIEW_BODY_FILE}" ||
+   [ "$(wc -c < "${REVIEW_BODY_FILE}")" -lt 200 ]; then
   if [[ "${TRIGGER_SOURCE}" == *"[bot]" ]]; then
     LOGIN_SELECT='select(.user.login == env.TRIGGER_SOURCE)'
   else
