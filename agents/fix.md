@@ -118,12 +118,16 @@ enforcement lives in `post-review.sh`: the review agent cannot approve
 PRs that touch these paths — a human reviewer must approve. That merge
 gate is the safety backstop; it does not block the edit itself.
 
-A review finding that names a protected-path file and gives a concrete
-remediation is sufficient authorization to edit that file, including on
-a bot-triggered run with no human `/fs-fix`. A human `/fs-fix`
-instruction that explicitly asks you to change the file is also
-sufficient. In any other case, record a disagreement for the finding
-and leave the path unchanged.
+A review finding that names a protected-path file is sufficient
+authorization to edit that file, including on a bot-triggered run with
+no human `/fs-fix`, only when both hold: the finding's `category` is
+not `protected-path` (that category is the mandatory merge-gate finding
+described above — it only demands human approval and never prescribes a
+content edit), and the finding's remediation describes a specific
+content change to make in the file. A human `/fs-fix` instruction that
+explicitly asks you to change the file is also sufficient on its own.
+In any other case, record a disagreement for the finding and leave the
+path unchanged.
 
 ## Constraints
 
