@@ -1793,7 +1793,7 @@ FIX_AGENT_GIT_NAME="fullsend-fix"
 # agent from this fix agent) or when a non-fix-agent commit would be lost
 # by publishing the rewrite.
 history_rewrite_preserves_remote_human_commits() {
-  local bot remote_ref target_ref mb sha author_email author_name tree patch_id candidate candidate_name candidate_email candidate_patch_id
+  local bot remote_ref target_ref mb sha author_email author_name tree patch_id candidate candidate_name candidate_email candidate_patch_id candidate_tree
   bot="$(signoff_bot_email)"
   if [ -z "${bot}" ]; then
     echo "history-rewrite: agent git identity unavailable; refusing to publish rewrite" >&2
@@ -1813,9 +1813,24 @@ history_rewrite_preserves_remote_human_commits() {
         continue
       fi
       tree="$(git log -1 --format='%T' "${sha}" 2>/dev/null)"
-      if [ -n "${tree}" ] && git log --format='%T %an %ae' HEAD 2>/dev/null \
-          | grep -qF "${tree} ${author_name} ${author_email}"; then
-        continue
+      if [ -n "${tree}" ]; then
+        # Candidates are restricted to the range being published
+        # (target_ref..HEAD), not all of HEAD's ancestry — same rationale
+        # as the patch-id loop below: HEAD also contains target-branch
+        # history up to the fork point (the caller requires that fork
+        # point to be an ancestor of HEAD), and a same-tree-and-author
+        # commit already inherited from the target branch proves nothing
+        # about whether this PR's own commit survived the rewrite.
+        # Matching is done with exact field equality rather than
+        # `grep -qF` against a bare "tree name email" string, which is an
+        # unanchored substring match.
+        while IFS=$'\t' read -r candidate_tree candidate_name candidate_email; do
+          [ -n "${candidate_tree}" ] || continue
+          [ "${candidate_tree}" = "${tree}" ] || continue
+          [ "${candidate_name}" = "${author_name}" ] || continue
+          [ "${candidate_email}" = "${author_email}" ] || continue
+          continue 2
+        done < <(git log --format='%T%x09%an%x09%ae' "${target_ref}..HEAD" 2>/dev/null)
       fi
       patch_id="$(git show "${sha}" 2>/dev/null | git patch-id --stable 2>/dev/null | awk '{print $1}')"
       if [ -n "${patch_id}" ]; then
