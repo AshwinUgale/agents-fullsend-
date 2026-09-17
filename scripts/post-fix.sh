@@ -1556,6 +1556,46 @@ if [ "${NO_PUSH}" = "false" ]; then
   fi
 fi
 
+# ---------------------------------------------------------------------------
+# 0c. Force-fetch the target branch and pin a trusted SHA (on demand).
+#
+# origin/${TARGET_BRANCH} is a local remote-tracking ref inside the runner's
+# checkout of the sandbox's extracted repo. Unlike origin/${BRANCH} (force-
+# fetched below, right before the push), nothing previously refreshed it
+# before it got used for security-relevant computations: the DIFF_BASE
+# rebase-detection fallback just below (which sizes the gitleaks/pre-commit
+# SCAN_RANGE), the squash fork point, and the squash single-commit publish
+# bound. A locally-moved ref (e.g. via a stray `git update-ref`) could
+# silently shrink the scan range or satisfy the squash bound without the
+# per-commit preservation check ever running (PR #1335). Fetch it fresh —
+# via the same authenticated remote used for the origin/${BRANCH} fetch
+# below (the extracted repo's origin has no working credentials until
+# forge_set_push_remote runs) — and pin the resulting SHA once, then reuse
+# that pinned value everywhere below instead of re-reading the mutable ref.
+# Memoized and called lazily from each use site below: it is only needed
+# on paths that actually consult the target branch (a detected history
+# rewrite, or the squash/redo publish gate), not on every push.
+# ---------------------------------------------------------------------------
+TRUSTED_TARGET_SHA=""
+fetch_trusted_target_sha() {
+  if [ -n "${TRUSTED_TARGET_SHA}" ]; then
+    return 0
+  fi
+  forge_set_push_remote "${PUSH_TOKEN}"
+  echo "Fetching target branch ${TARGET_BRANCH}..."
+  if ! TARGET_FETCH_OUTPUT="$(git fetch origin "+refs/heads/${TARGET_BRANCH}:refs/remotes/origin/${TARGET_BRANCH}" 2>&1)"; then
+    print_sanitized_gha_log "${TARGET_FETCH_OUTPUT}" stderr
+    post_fail_to_pr setup-error \
+      "Could not fetch target branch '${TARGET_BRANCH}': ${TARGET_FETCH_OUTPUT}"
+  fi
+  print_sanitized_gha_log "${TARGET_FETCH_OUTPUT}"
+  TRUSTED_TARGET_SHA="$(git rev-parse "refs/remotes/origin/${TARGET_BRANCH}" 2>/dev/null)" || TRUSTED_TARGET_SHA=""
+  if [ -z "${TRUSTED_TARGET_SHA}" ]; then
+    post_fail_to_pr setup-error \
+      "Could not resolve freshly fetched target branch '${TARGET_BRANCH}' to a commit SHA."
+  fi
+}
+
 # Scope to the agent's commit(s) only — not the entire branch. PRE_AGENT_HEAD
 # is set by fix.yml to the HEAD SHA before the harness runs, so this diff
 # captures every commit the agent made (including validation_loop retries).
@@ -1569,7 +1609,10 @@ DIFF_BASE="${PRE_AGENT_HEAD:-$(git rev-parse HEAD~1 2>/dev/null || echo HEAD)}"
 # isolates only the branch's own commits — the same approach used for
 # BRANCH_CHANGED_FILES below and for SCAN_RANGE in post-code.src.sh.
 if ! git merge-base --is-ancestor "${DIFF_BASE}" HEAD 2>/dev/null; then
-  _rebase_mb="$(git merge-base HEAD "origin/${TARGET_BRANCH}" 2>/dev/null)" || _rebase_mb=""
+  if [ "${NO_PUSH}" = "false" ]; then
+    fetch_trusted_target_sha
+  fi
+  _rebase_mb="$(git merge-base HEAD "${TRUSTED_TARGET_SHA}" 2>/dev/null)" || _rebase_mb=""
   if [ -n "${_rebase_mb}" ]; then
     echo "PRE_AGENT_HEAD is not an ancestor of HEAD (history rewrite detected) — using merge-base for DIFF_BASE"
     DIFF_BASE="${_rebase_mb}"
@@ -1963,7 +2006,8 @@ if [ "${NO_PUSH}" = "false" ]; then
     # must run — and be able to refuse publication — whenever the agent
     # recorded a history rewrite and a human asked for one, regardless of
     # what the rebase-skip block already decided.
-    REWRITE_FORK_POINT="$(git merge-base "origin/${TARGET_BRANCH}" "origin/${BRANCH}" 2>/dev/null)" || REWRITE_FORK_POINT=""
+    fetch_trusted_target_sha
+    REWRITE_FORK_POINT="$(git merge-base "${TRUSTED_TARGET_SHA}" "origin/${BRANCH}" 2>/dev/null)" || REWRITE_FORK_POINT=""
     if [ "${AGENT_HISTORY_REWRITTEN}" = "true" ] \
       && [ "${HUMAN_HISTORY_REWRITE_REQUESTED}" = "true" ] \
       && [ -n "${REWRITE_FORK_POINT}" ] \
@@ -2013,7 +2057,7 @@ if [ "${NO_PUSH}" = "false" ]; then
         # above already authorized skipping replay for an unrelated reason
         # (target-advance rebase).
         if [ "${HUMAN_SQUASH_REQUESTED}" = "true" ] && [ "${HUMAN_RESET_REQUESTED}" = "false" ]; then
-          REWRITE_TARGET_COUNT="$(git rev-list --count "origin/${TARGET_BRANCH}..HEAD" 2>/dev/null)" || REWRITE_TARGET_COUNT="-1"
+          REWRITE_TARGET_COUNT="$(git rev-list --count "${TRUSTED_TARGET_SHA}..HEAD" 2>/dev/null)" || REWRITE_TARGET_COUNT="-1"
           if [ "${REWRITE_TARGET_COUNT}" = "1" ]; then
             if [ "${SKIP_REMOTE_REBASE}" = "false" ]; then
               SKIP_REMOTE_REBASE=true

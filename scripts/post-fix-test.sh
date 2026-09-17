@@ -749,6 +749,21 @@ chmod +x "${REBASE_MOCK_BIN}/gitleaks"
 # Mock pre-commit: not installed (skip pre-commit gate)
 # No mock needed — command -v will fail naturally.
 
+# The fix agent's fresh force-fetch of origin/${TARGET_BRANCH} (PR #1335)
+# calls forge_set_push_remote first, which would otherwise rewrite the
+# test's local "fake origin" (set up below) to a real github.com URL. Same
+# no-op-`remote set-url` wrapper as the push-rebase fixtures further down,
+# so the fetch stays against the local fake origin.
+REBASE_REAL_GIT="$(which git)"
+cat > "${REBASE_MOCK_BIN}/git" <<MOCKEOF
+#!/usr/bin/env bash
+if [ "\$1" = "remote" ] && [ "\$2" = "set-url" ]; then
+  exit 0
+fi
+exec ${REBASE_REAL_GIT} "\$@"
+MOCKEOF
+chmod +x "${REBASE_MOCK_BIN}/git"
+
 run_rebase_diffbase_test() {
   local test_name="$1"
 

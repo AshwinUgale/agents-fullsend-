@@ -307,8 +307,19 @@ range redo/reset uses (below).
    describe everything that ended up in the PR: the original goal *and*
    what changed along the way and why. A message that only restates the
    initial intent is incomplete once the code has moved past it.
-8. After a successful squash, further code fixes land as **new commits**
-   on top of the squashed commit.
+8. If this run also needs to address other review findings or human
+   instructions alongside the squash, fold that work into the single
+   squash commit rather than appending it afterward: make the edits
+   first, then run the squash mechanics (step 5) once so the one new
+   commit's tree already includes them. Do not land same-run work as a
+   separate commit on top of the squash — step 9 (and the post-script
+   publish gate) requires exactly one commit between `origin/${BASE}` and
+   HEAD, so an appended commit either forces you to drop
+   `history_rewritten` (silently undoing the squash when the post-script
+   rebases onto the pre-squash remote tip) or gets the whole push refused.
+   "Further fixes as new commits" only applies to a **later** run, after
+   this squash has already been published and a fresh `/fs-fix` starts
+   from the single squashed commit.
 9. Set the top-level `history_rewritten: true` field in
    `agent-result.json` whenever this run's HEAD reflects a squash that
    still needs to be published on the remote PR — a completed squash
