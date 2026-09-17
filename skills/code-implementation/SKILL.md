@@ -289,6 +289,16 @@ and `Glob` to inspect project configuration:
    or `.github/workflows/` (e.g., a `check-pr-title` action). Classify as
    **ticket-scope** (ticket in title), **area-scope** (codebase-area noun),
    or **unknown**.
+
+   **Priority rule:** classify **ticket-scope** whenever the docs,
+   commitlint config, or CI require or prefer a ticket id in the title —
+   even when Conventional Commits or `config-conventional` is also cited.
+   Citing the Conventional Commits spec only establishes the
+   `type(scope): description` shape; it does not by itself mean scope must
+   be an area noun, and commitlint's stock `config-conventional` preset
+   does not restrict `scope` to area nouns either. Classify **area-scope**
+   only when the guidance affirmatively requires an area noun as scope and
+   does not also accept ticket ids as scope.
 5. **Check for PR template.** Find the repo's pull request template(s).
    If multiple templates exist, note them — you will select the right
    one in step 10d after classifying the task type. If found, read and
