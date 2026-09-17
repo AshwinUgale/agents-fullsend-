@@ -2865,6 +2865,107 @@ run_push_history_rewrite_preserves_squash_target_advanced_test() {
   echo "PASS: ${test_name}"
 }
 
+# Combined "rebase and squash" (agents/fix.md: "If the instruction asks for
+# a rebase and a squash, rebase first, then squash the authorized range on
+# the rebased history"). The rebase-skip block's ancestry requirement
+# (target has advanced past the remote PR tip) is satisfied first and sets
+# SKIP_REMOTE_REBASE=true before the squash/redo block is ever reached —
+# that is the ordinary reason a human asks for a rebase in the first place.
+# That must not bypass history_rewrite_preserves_remote_human_commits: a
+# redo that discards a human-authored commit on this combined path must
+# still be refused, with the remote left untouched — see the high-severity
+# logic-error finding on PR #1335 at post-fix.src.sh:505.
+run_push_history_rewrite_refuses_lost_human_commit_after_rebase_test() {
+  local test_name="push-history-rewrite-refuses-lost-human-commit-after-rebase"
+  local base="${PUSH_REBASE_TMPDIR}/${test_name}"
+  mkdir -p "${base}"
+  local bot_email="bot@example.com"
+  local human_email="human@example.com"
+
+  git init -q --bare -b main "${base}/remote.git"
+  git init -q -b main "${base}/seed"
+  push_rebase_ident "${base}/seed"
+  echo "base" > "${base}/seed/file.txt"
+  git -C "${base}/seed" add file.txt
+  commit_as "${base}/seed" "${bot_email}" "fullsend-code" "init"
+  git -C "${base}/seed" remote add origin "${base}/remote.git"
+  git -C "${base}/seed" push -q -u origin main
+
+  git -C "${base}/seed" checkout -q -b agent/99-test-fix
+  echo "human" > "${base}/seed/human.txt"
+  git -C "${base}/seed" add human.txt
+  commit_as "${base}/seed" "${human_email}" "Alice" "feat: human work"
+  echo "f1" > "${base}/seed/file.txt"
+  git -C "${base}/seed" add file.txt
+  commit_as "${base}/seed" "${bot_email}" "fullsend-fix" "fix: attempt 1"
+  git -C "${base}/seed" push -q -u origin agent/99-test-fix
+  local remote_tip
+  remote_tip="$(git -C "${base}/seed" rev-parse HEAD)"
+
+  # Target moves on after the PR branch was built — the ordinary reason a
+  # human asks for a rebase.
+  git -C "${base}/seed" checkout -q main
+  echo "ahead" > "${base}/seed/other.txt"
+  git -C "${base}/seed" add other.txt
+  commit_as "${base}/seed" "${bot_email}" "fullsend-code" "main ahead"
+  git -C "${base}/seed" push -q origin main
+
+  git clone -q "${base}/remote.git" "${base}/repo"
+  push_rebase_ident "${base}/repo"
+  git -C "${base}/repo" checkout -q agent/99-test-fix
+  git -C "${base}/repo" rebase -q origin/main
+  # Redo past the (just-rebased) human commit: reset to the rebased-onto
+  # target and recommit without it — discards the human's work.
+  git -C "${base}/repo" reset -q --hard origin/main
+  echo "gone" > "${base}/repo/file.txt"
+  git -C "${base}/repo" add file.txt
+  commit_as "${base}/repo" "${bot_email}" "fullsend-fix" "fix: redo past human after rebase"
+
+  mkdir -p "${base}/iteration-1/output"
+  cat > "${base}/iteration-1/output/agent-result.json" <<'JSONEOF'
+{
+  "pr_number": 99,
+  "trigger_source": "human",
+  "actions": [
+    {"type": "fix", "finding": "rebase and redo", "description": "Rebased onto main, then redid the fix-agent work from scratch."}
+  ],
+  "summary": "Rebased and redid fix-agent history.",
+  "tests_passed": true,
+  "files_changed": ["file.txt"],
+  "rebased_onto_target": true,
+  "history_rewritten": true
+}
+JSONEOF
+
+  local stdout_log="${PUSH_REBASE_TMPDIR}/stdout-${test_name}.log"
+  local exit_code=0
+  GIT_BOT_EMAIL="${bot_email}" \
+    run_push_rebase_postfix "${base}" "${stdout_log}" "${PUSH_REBASE_MOCK_BIN}" \
+    "test-user" "rebase onto main and redo from scratch" || exit_code=$?
+
+  if [ "${exit_code}" -eq 0 ]; then
+    echo "FAIL: ${test_name} — expected non-zero exit when a human commit would be lost on the combined rebase+redo path"
+    cat "${stdout_log}"
+    FAILURES=$((FAILURES + 1))
+    return
+  fi
+  if ! grep -q "human-authored commit" "${stdout_log}"; then
+    echo "FAIL: ${test_name} — missing fail-closed message about the lost human commit"
+    cat "${stdout_log}"
+    FAILURES=$((FAILURES + 1))
+    return
+  fi
+  local after
+  after="$(git --git-dir="${base}/remote.git" rev-parse refs/heads/agent/99-test-fix)"
+  if [ "${after}" != "${remote_tip}" ]; then
+    echo "FAIL: ${test_name} — remote branch moved despite fail-closed rewrite"
+    echo "  want ${remote_tip}, got ${after}"
+    FAILURES=$((FAILURES + 1))
+    return
+  fi
+  echo "PASS: ${test_name}"
+}
+
 # A GitLab MR reconstruction can produce the exact same topology the
 # squash/redo skip checks for (diverged from origin/BRANCH, still contains
 # the fork point) even when no rewrite happened at all — reconstructed
@@ -3168,6 +3269,7 @@ run_push_history_rewrite_preserves_human_suffix_test
 run_push_history_rewrite_refuses_lost_human_commit_test
 run_push_history_rewrite_refuses_lost_code_agent_commit_test
 run_push_history_rewrite_preserves_squash_target_advanced_test
+run_push_history_rewrite_refuses_lost_human_commit_after_rebase_test
 run_push_history_rewrite_indistinguishable_from_reconstruction_test
 run_push_history_rewrite_preserves_reconstructed_human_commit_test
 run_push_history_rewrite_bot_trigger_ignores_marker_test

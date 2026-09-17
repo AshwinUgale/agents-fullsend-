@@ -1887,9 +1887,21 @@ if [ "${NO_PUSH}" = "false" ]; then
     # fork point instead — the merge-base of the two remote refs, which is
     # unaffected both by the local rewrite and by TARGET_BRANCH's later
     # advancement.
+    #
+    # This block is NOT gated on SKIP_REMOTE_REBASE = false: when a human
+    # asks for a rebase and a squash together, the rebase-skip block above
+    # can already have set SKIP_REMOTE_REBASE = true (its ancestry
+    # requirement — target has advanced past the remote PR tip — is the
+    # ordinary reason a human asks for a rebase in the first place). Gating
+    # this block on SKIP_REMOTE_REBASE = false would skip
+    # history_rewrite_preserves_remote_human_commits entirely on that
+    # combined path, force-pushing a squash/redo with no preservation check
+    # at all (high-severity finding on PR #1335). The preservation check
+    # must run — and be able to refuse publication — whenever the agent
+    # recorded a history rewrite and a human asked for one, regardless of
+    # what the rebase-skip block already decided.
     REWRITE_FORK_POINT="$(git merge-base "origin/${TARGET_BRANCH}" "origin/${BRANCH}" 2>/dev/null)" || REWRITE_FORK_POINT=""
-    if [ "${SKIP_REMOTE_REBASE}" = "false" ] \
-      && [ "${AGENT_HISTORY_REWRITTEN}" = "true" ] \
+    if [ "${AGENT_HISTORY_REWRITTEN}" = "true" ] \
       && [ "${HUMAN_HISTORY_REWRITE_REQUESTED}" = "true" ] \
       && [ -n "${REWRITE_FORK_POINT}" ] \
       && git merge-base --is-ancestor "${REWRITE_FORK_POINT}" HEAD 2>/dev/null \
@@ -1904,22 +1916,28 @@ if [ "${NO_PUSH}" = "false" ]; then
       # the remote range (a squash) or HEAD's final tree differs from
       # origin/BRANCH's (a redo). If neither holds, local HEAD is
       # structurally indistinguishable from a reconstruction of
-      # origin/BRANCH, so fall through to the ordinary rebase below rather
-      # than skip it.
+      # origin/BRANCH — nothing was actually rewritten, so there is
+      # nothing to verify or skip on this path.
       REWRITE_LOCAL_COUNT="$(git rev-list --count "${REWRITE_FORK_POINT}..HEAD" 2>/dev/null)" || REWRITE_LOCAL_COUNT="0"
       REWRITE_REMOTE_COUNT="$(git rev-list --count "${REWRITE_FORK_POINT}..origin/${BRANCH}" 2>/dev/null)" || REWRITE_REMOTE_COUNT="0"
       REWRITE_LOCAL_TREE="$(git rev-parse "HEAD^{tree}" 2>/dev/null)" || REWRITE_LOCAL_TREE=""
       REWRITE_REMOTE_TREE="$(git rev-parse "origin/${BRANCH}^{tree}" 2>/dev/null)" || REWRITE_REMOTE_TREE=""
       if [ "${REWRITE_LOCAL_COUNT}" -lt "${REWRITE_REMOTE_COUNT}" ] \
         || [ "${REWRITE_LOCAL_TREE}" != "${REWRITE_REMOTE_TREE}" ]; then
+        # A genuine rewrite is on HEAD. Verify it preserves every
+        # non-fix-agent remote commit — even if the rebase-skip above
+        # already authorized skipping replay for an unrelated reason
+        # (target-advance rebase). Refuse to publish on failure regardless.
         if history_rewrite_preserves_remote_human_commits; then
-          SKIP_REMOTE_REBASE=true
-          echo "Local HEAD has rewritten authorized agent history and has diverged from origin/${BRANCH} — skipping rebase onto origin/${BRANCH} to preserve the agent history rewrite"
+          if [ "${SKIP_REMOTE_REBASE}" = "false" ]; then
+            SKIP_REMOTE_REBASE=true
+            echo "Local HEAD has rewritten authorized agent history and has diverged from origin/${BRANCH} — skipping rebase onto origin/${BRANCH} to preserve the agent history rewrite"
+          fi
         else
           post_fail_to_pr push-rejected \
             "Refusing to publish history rewrite: a human-authored commit on origin/${BRANCH} is not an ancestor of local HEAD, or the agent git identity is unavailable. The authorized range is the contiguous fix-agent suffix at HEAD; human-authored commits must be preserved."
         fi
-      else
+      elif [ "${SKIP_REMOTE_REBASE}" = "false" ]; then
         echo "history_rewritten is set but local HEAD is structurally indistinguishable from origin/${BRANCH} (same commit count and tree) — treating as a GitLab reconstruction rather than a genuine rewrite, and falling through to rebase onto origin/${BRANCH}"
       fi
     fi
