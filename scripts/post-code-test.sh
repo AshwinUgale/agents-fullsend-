@@ -302,6 +302,23 @@ else
   echo "PASS: skill-documents-inject-issue-scope-opt-out"
 fi
 
+if ! grep -q 'A scope MUST consist of a noun' "${SKILL_FILE}" \
+  || ! grep -q 'describing a section of the codebase' "${SKILL_FILE}"; then
+  echo "FAIL: skill-quotes-cc-v1-item-4-scope"
+  echo "  ${SKILL_FILE} missing Conventional Commits v1.0.0 item 4 quote"
+  FAILURES=$((FAILURES + 1))
+else
+  echo "PASS: skill-quotes-cc-v1-item-4-scope"
+fi
+
+if ! grep -q 'fix(parser):' "${SKILL_FILE}" || ! grep -q 'feat(#1234):' "${SKILL_FILE}"; then
+  echo "FAIL: skill-has-cc-scope-examples"
+  echo "  ${SKILL_FILE} missing area-scope/ticket-scope examples"
+  FAILURES=$((FAILURES + 1))
+else
+  echo "PASS: skill-has-cc-scope-examples"
+fi
+
 # ---------------------------------------------------------------------------
 # Test helper — reimplements the multi-commit title selection logic from
 # post-code.sh so we can test it without a git repo or network access.

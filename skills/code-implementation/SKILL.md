@@ -285,11 +285,13 @@ and `Glob` to inspect project configuration:
 3. **Check for linter configuration.** Use `Glob` to find files like
    `.golangci.yml`, `.eslintrc*`, `.pre-commit-config.yaml`, `ruff.toml`.
 4. **Check for PR title conventions** in `CLAUDE.md`, `CONTRIBUTING.md`,
-   `COMMITS.md`, `commitlint.config.*`, or `.github/workflows/`. Classify
-   **ticket-scope** if any ticket-id preference exists anywhere (docs,
-   commitlint, CI) — even alongside a Conventional Commits citation;
-   **area-scope** only if CC's area-noun scope applies with no ticket-id
-   preference; else **unknown**.
+   `COMMITS.md`, `commitlint.config.*`, or `.github/workflows/`.
+   Conventional Commits v1.0.0 item 4: "A scope MUST consist of a noun
+   describing a section of the codebase surrounded by parenthesis, e.g.,
+   `fix(parser):`". **ticket-scope** if any ticket-id preference exists
+   (docs, commitlint, CI), even with a CC citation (`feat(#1234):` is
+   correct, wrong for area-scope); **area-scope** only if that MUST
+   applies with no ticket-id preference; else **unknown**.
 5. **Check for PR template.** Find the repo's pull request template(s).
    If multiple templates exist, note them — you will select the right
    one in step 10d after classifying the task type. If found, read and
@@ -306,9 +308,8 @@ From these files, determine:
   `npm test`, `pytest`)
 - **Lint command** — how to run linters (e.g., `make lint`, `pre-commit run --files`)
 - **Commit conventions** — message format
-- **PR title conventions** — ticket-scope/area-scope/unknown (step 4);
-  the post-script injects `(#ISSUE_NUMBER)` into the PR title unless
-  `inject_issue_scope` is `false`.
+- **PR title conventions** — from step 4; post-script injects
+  `(#ISSUE_NUMBER)` unless `inject_issue_scope` is `false`.
 - **Branch conventions** — naming patterns, target branch
 
 Determine the correct target branch from the issue context. If the issue
@@ -965,9 +966,8 @@ The commit message must:
   uses a specific format (e.g., Conventional Commits, Angular-style, ticket
   prefixes), follow it.
 - **Scope from step 3** (post-script uses the commit subject as the PR
-  title): `<type>(#<number>): <description>` for ticket-scope/unknown
-  (or a Jira key: `<type>(PROJ-123): ...`); `<type>(<area>): <description>`
-  for area-scope — put the issue in the body trailer and set
+  title): ticket-scope/unknown use `<type>(#<number>):` (or a Jira key);
+  area-scope uses a codebase-area noun and sets
   `inject_issue_scope: false` in the result file (step 10d).
 - **Reference the issue number in the body.** If your implementation
   fully addresses the issue scope, use `Closes #<number>`. If your
