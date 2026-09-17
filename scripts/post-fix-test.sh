@@ -2966,6 +2966,113 @@ JSONEOF
   echo "PASS: ${test_name}"
 }
 
+# The ordinary success path agents/fix.md documents for a combined "rebase
+# and squash" instruction: the target has genuinely advanced with an
+# unrelated file change, the PR branch carries a human commit under the
+# fix-agent suffix, the agent rebases onto the new target and then squashes
+# only the fix-agent commits. A genuine rebase reapplies the human commit's
+# patch onto the advanced target, so the resulting commit's tree now also
+# contains the target's unrelated change — it can never be full-tree-
+# identical to the original, even though the human's own change was
+# preserved intact. history_rewrite_preserves_remote_human_commits must
+# recognize this via patch-id equivalence, not just full-tree equivalence
+# (which only ever matches an in-place GitLab reconstruction) — see the
+# high-severity logic-error finding on PR #1335 at post-fix.src.sh:443.
+run_push_history_rewrite_preserves_rebased_human_commit_test() {
+  local test_name="push-history-rewrite-preserves-rebased-human-commit"
+  local base="${PUSH_REBASE_TMPDIR}/${test_name}"
+  mkdir -p "${base}"
+  local bot_email="bot@example.com"
+  local human_email="human@example.com"
+
+  git init -q --bare -b main "${base}/remote.git"
+  git init -q -b main "${base}/seed"
+  push_rebase_ident "${base}/seed"
+  echo "base" > "${base}/seed/file.txt"
+  git -C "${base}/seed" add file.txt
+  commit_as "${base}/seed" "${bot_email}" "fullsend-code" "init"
+  git -C "${base}/seed" remote add origin "${base}/remote.git"
+  git -C "${base}/seed" push -q -u origin main
+
+  git -C "${base}/seed" checkout -q -b agent/99-test-fix
+  echo "human" > "${base}/seed/human.txt"
+  git -C "${base}/seed" add human.txt
+  commit_as "${base}/seed" "${human_email}" "Alice" "feat: human work"
+  echo "f1" > "${base}/seed/file.txt"
+  git -C "${base}/seed" add file.txt
+  commit_as "${base}/seed" "${bot_email}" "fullsend-fix" "fix: attempt 1"
+  echo "f2" > "${base}/seed/file.txt"
+  git -C "${base}/seed" add file.txt
+  commit_as "${base}/seed" "${bot_email}" "fullsend-fix" "fix: attempt 2"
+  git -C "${base}/seed" push -q -u origin agent/99-test-fix
+  local pre_rewrite_tip
+  pre_rewrite_tip="$(git -C "${base}/seed" rev-parse HEAD)"
+
+  # Target moves on after the PR branch was built — the ordinary reason a
+  # human asks for a rebase.
+  git -C "${base}/seed" checkout -q main
+  echo "ahead" > "${base}/seed/other.txt"
+  git -C "${base}/seed" add other.txt
+  commit_as "${base}/seed" "${bot_email}" "fullsend-code" "main ahead"
+  git -C "${base}/seed" push -q origin main
+
+  git clone -q "${base}/remote.git" "${base}/repo"
+  push_rebase_ident "${base}/repo"
+  git -C "${base}/repo" checkout -q agent/99-test-fix
+  # Genuine rebase: the human commit is replayed intact, but its resulting
+  # tree now also contains other.txt from the advanced target.
+  git -C "${base}/repo" rebase -q origin/main
+  # Squash only the fix-agent suffix on the rebased history.
+  local fork_point human_sha
+  fork_point="$(git -C "${base}/repo" merge-base origin/main HEAD)"
+  human_sha="$(git -C "${base}/repo" rev-list "${fork_point}..HEAD" | tail -1)"
+  git -C "${base}/repo" reset -q --soft "${human_sha}"
+  commit_as "${base}/repo" "${bot_email}" "fullsend-fix" "fix: squashed fix-agent commits"
+
+  mkdir -p "${base}/iteration-1/output"
+  cat > "${base}/iteration-1/output/agent-result.json" <<'JSONEOF'
+{
+  "pr_number": 99,
+  "trigger_source": "human",
+  "actions": [
+    {"type": "fix", "finding": "rebase and squash", "description": "Rebased onto main, then squashed the fix-agent suffix."}
+  ],
+  "summary": "Rebased and squashed fix-agent history.",
+  "tests_passed": true,
+  "files_changed": ["file.txt"],
+  "rebased_onto_target": true,
+  "history_rewritten": true
+}
+JSONEOF
+
+  local stdout_log="${PUSH_REBASE_TMPDIR}/stdout-${test_name}.log"
+  local exit_code=0
+  GIT_BOT_EMAIL="${bot_email}" \
+    run_push_rebase_postfix "${base}" "${stdout_log}" "${PUSH_REBASE_MOCK_BIN}" \
+    "test-user" "rebase onto main and squash" || exit_code=$?
+
+  if [ "${exit_code}" -ne 0 ]; then
+    echo "FAIL: ${test_name} — exit code ${exit_code}"
+    cat "${stdout_log}"
+    FAILURES=$((FAILURES + 1))
+    return
+  fi
+  local human_file
+  human_file="$(git --git-dir="${base}/remote.git" show refs/heads/agent/99-test-fix:human.txt)"
+  if [ "${human_file}" != "human" ]; then
+    echo "FAIL: ${test_name} — human.txt is '${human_file}', want 'human'"
+    FAILURES=$((FAILURES + 1))
+    return
+  fi
+  if git --git-dir="${base}/remote.git" merge-base --is-ancestor \
+       refs/heads/agent/99-test-fix "${pre_rewrite_tip}" 2>/dev/null; then
+    echo "FAIL: ${test_name} — remote tip did not advance past the pre-rewrite state"
+    FAILURES=$((FAILURES + 1))
+    return
+  fi
+  echo "PASS: ${test_name}"
+}
+
 # A GitLab MR reconstruction can produce the exact same topology the
 # squash/redo skip checks for (diverged from origin/BRANCH, still contains
 # the fork point) even when no rewrite happened at all — reconstructed
@@ -3270,6 +3377,7 @@ run_push_history_rewrite_refuses_lost_human_commit_test
 run_push_history_rewrite_refuses_lost_code_agent_commit_test
 run_push_history_rewrite_preserves_squash_target_advanced_test
 run_push_history_rewrite_refuses_lost_human_commit_after_rebase_test
+run_push_history_rewrite_preserves_rebased_human_commit_test
 run_push_history_rewrite_indistinguishable_from_reconstruction_test
 run_push_history_rewrite_preserves_reconstructed_human_commit_test
 run_push_history_rewrite_bot_trigger_ignores_marker_test

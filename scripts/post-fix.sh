@@ -1778,15 +1778,22 @@ FIX_AGENT_GIT_NAME="fullsend-fix"
 # origin/BRANCH since it diverged from origin/TARGET_BRANCH that is NOT
 # authored by this fix agent (email + name, not email alone — see
 # FIX_AGENT_GIT_NAME above) is still present in local HEAD, either as an
-# exact-SHA ancestor or as an equivalent (same tree + same author identity)
-# commit. The equivalence fallback tolerates GitLab MR reconstruction,
-# where local history is rebuilt from API content and gets different commit
-# SHAs even when the tree/author content is identical. Fail closed when the
-# agent identity is unknown (cannot tell humans/code-agent from this fix
-# agent) or when a non-fix-agent commit would be lost by publishing the
-# rewrite.
+# exact-SHA ancestor, or as an equivalent commit recognized by one of two
+# fallbacks:
+#   - same tree + same author identity — tolerates GitLab MR reconstruction,
+#     where local history is rebuilt from API content and gets different
+#     commit SHAs even when the tree/author content is identical.
+#   - same author identity + same patch-id — tolerates a genuine rebase,
+#     which reapplies the commit's patch onto a new base tree. The
+#     resulting commit's full tree then differs from the original whenever
+#     the new base touched other files, even though the author's own change
+#     was preserved intact; patch-id (the diff the commit introduces) is
+#     the quantity a rebase actually preserves, unlike the full tree.
+# Fail closed when the agent identity is unknown (cannot tell humans/code-
+# agent from this fix agent) or when a non-fix-agent commit would be lost
+# by publishing the rewrite.
 history_rewrite_preserves_remote_human_commits() {
-  local bot remote_ref target_ref mb sha author_email author_name tree
+  local bot remote_ref target_ref mb sha author_email author_name tree patch_id candidate candidate_email candidate_patch_id
   bot="$(signoff_bot_email)"
   if [ -z "${bot}" ]; then
     echo "history-rewrite: agent git identity unavailable; refusing to publish rewrite" >&2
@@ -1806,11 +1813,23 @@ history_rewrite_preserves_remote_human_commits() {
         continue
       fi
       tree="$(git log -1 --format='%T' "${sha}" 2>/dev/null)"
-      if [ -z "${tree}" ] || ! git log --format='%T %an %ae' HEAD 2>/dev/null \
+      if [ -n "${tree}" ] && git log --format='%T %an %ae' HEAD 2>/dev/null \
           | grep -qF "${tree} ${author_name} ${author_email}"; then
-        echo "history-rewrite: commit ${sha} (author ${author_name} <${author_email}>) on ${remote_ref} is not an ancestor of HEAD and has no equivalent (tree+author) commit in HEAD" >&2
-        return 1
+        continue
       fi
+      patch_id="$(git show "${sha}" 2>/dev/null | git patch-id --stable 2>/dev/null | awk '{print $1}')"
+      if [ -n "${patch_id}" ]; then
+        for candidate in $(git log --format='%H' --author="${author_name}" HEAD 2>/dev/null); do
+          candidate_email="$(git log -1 --format='%ae' "${candidate}" 2>/dev/null)"
+          [ "${candidate_email}" = "${author_email}" ] || continue
+          candidate_patch_id="$(git show "${candidate}" 2>/dev/null | git patch-id --stable 2>/dev/null | awk '{print $1}')"
+          if [ -n "${candidate_patch_id}" ] && [ "${candidate_patch_id}" = "${patch_id}" ]; then
+            continue 2
+          fi
+        done
+      fi
+      echo "history-rewrite: commit ${sha} (author ${author_name} <${author_email}>) on ${remote_ref} is not an ancestor of HEAD and has no equivalent (tree+author or patch-id+author) commit in HEAD" >&2
+      return 1
     fi
   done
   return 0
