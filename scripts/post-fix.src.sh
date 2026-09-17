@@ -44,8 +44,9 @@
 #   ITERATION_CAP     — max iterations (default: 5)
 #   PUSH_TOKEN_SOURCE — "github-app" (for logging)
 #   HUMAN_INSTRUCTION — the harness-captured /fs-fix comment text (only for
-#                       human-triggered runs); used to confirm a rebase was
-#                       actually requested before trusting rebased_onto_target
+#                       human-triggered runs); used to confirm a rebase or
+#                       squash/redo was actually requested before trusting
+#                       rebased_onto_target / history_rewritten
 #   POST_FAILURE_DETAIL_MAX_LINES
 #                     — max lines of failure detail in issue/PR comments (default: 30)
 #
@@ -205,7 +206,7 @@ DIFF_BASE="${PRE_AGENT_HEAD:-$(git rev-parse HEAD~1 2>/dev/null || echo HEAD)}"
 if ! git merge-base --is-ancestor "${DIFF_BASE}" HEAD 2>/dev/null; then
   _rebase_mb="$(git merge-base HEAD "origin/${TARGET_BRANCH}" 2>/dev/null)" || _rebase_mb=""
   if [ -n "${_rebase_mb}" ]; then
-    echo "PRE_AGENT_HEAD is not an ancestor of HEAD (rebase detected) — using merge-base for DIFF_BASE"
+    echo "PRE_AGENT_HEAD is not an ancestor of HEAD (history rewrite detected) — using merge-base for DIFF_BASE"
     DIFF_BASE="${_rebase_mb}"
   else
     post_fail_to_pr setup-error \
@@ -369,9 +370,12 @@ fi
 # jq failures (missing file, invalid JSON, field absent) all fall through to
 # "false", the fail-closed default — see issue #565.
 AGENT_REBASED_ONTO_TARGET=false
+AGENT_HISTORY_REWRITTEN=false
 if [ -n "${RESULT_FILE}" ] && [ -f "${RESULT_FILE}" ]; then
   AGENT_REBASED_ONTO_TARGET="$(jq -r 'if .rebased_onto_target == true then "true" else "false" end' "${RESULT_FILE}" 2>/dev/null || echo false)"
   [ "${AGENT_REBASED_ONTO_TARGET}" = "true" ] || AGENT_REBASED_ONTO_TARGET=false
+  AGENT_HISTORY_REWRITTEN="$(jq -r 'if .history_rewritten == true then "true" else "false" end' "${RESULT_FILE}" 2>/dev/null || echo false)"
+  [ "${AGENT_HISTORY_REWRITTEN}" = "true" ] || AGENT_HISTORY_REWRITTEN=false
 fi
 
 # A non-bot TRIGGER_SOURCE only proves a human triggered *this run* — it
@@ -387,6 +391,44 @@ HUMAN_REBASE_REQUESTED=false
 if ! is_bot_user "${TRIGGER_SOURCE}" && is_human_rebase_request "${HUMAN_INSTRUCTION:-}"; then
   HUMAN_REBASE_REQUESTED=true
 fi
+
+# Same trust boundary for squash/redo: history_rewritten in agent-result.json
+# is sandbox-written. Only a harness-captured human squash or redo instruction
+# may authorize skipping replay onto origin/BRANCH (issue #1332).
+HUMAN_HISTORY_REWRITE_REQUESTED=false
+if ! is_bot_user "${TRIGGER_SOURCE}" && is_human_history_rewrite_request "${HUMAN_INSTRUCTION:-}"; then
+  HUMAN_HISTORY_REWRITE_REQUESTED=true
+fi
+
+# history_rewrite_preserves_remote_human_commits — 0 when every non-bot
+# commit on origin/BRANCH since it diverged from origin/TARGET_BRANCH is
+# still an ancestor of local HEAD. Fail closed when the agent identity is
+# unknown (cannot tell humans from bots) or when a human commit would be
+# lost by publishing the rewrite.
+history_rewrite_preserves_remote_human_commits() {
+  local bot remote_ref target_ref mb sha author_email
+  bot="$(signoff_bot_email)"
+  if [ -z "${bot}" ]; then
+    echo "history-rewrite: agent git identity unavailable; refusing to publish rewrite" >&2
+    return 1
+  fi
+  remote_ref="origin/${BRANCH}"
+  target_ref="origin/${TARGET_BRANCH}"
+  mb="$(git merge-base "${target_ref}" "${remote_ref}" 2>/dev/null)" || {
+    echo "history-rewrite: could not compute merge-base of ${target_ref} and ${remote_ref}" >&2
+    return 1
+  }
+  for sha in $(git rev-list "${mb}..${remote_ref}" 2>/dev/null || true); do
+    author_email="$(git log -1 --format='%ae' "${sha}" 2>/dev/null)"
+    if [ "${author_email}" != "${bot}" ]; then
+      if ! git merge-base --is-ancestor "${sha}" HEAD 2>/dev/null; then
+        echo "history-rewrite: human-authored commit ${sha} on ${remote_ref} is not an ancestor of HEAD" >&2
+        return 1
+      fi
+    fi
+  done
+  return 0
+}
 
 # ---------------------------------------------------------------------------
 # 4. Push branch (only if we have commits)
@@ -442,6 +484,26 @@ if [ "${NO_PUSH}" = "false" ]; then
       SKIP_REMOTE_REBASE=true
       echo "Local HEAD is already based on origin/${TARGET_BRANCH} and has diverged from origin/${BRANCH} (target is ahead of the remote PR tip) — skipping rebase onto origin/${BRANCH} to preserve the agent rebase onto the target"
     fi
+    # Squash/redo (issue #1332): the agent rewrote the contiguous fix-agent
+    # suffix, so origin/BRANCH is no longer an ancestor of HEAD. Replaying
+    # onto the pre-rewrite remote tip would restore the discarded commits.
+    # Unlike the rebase skip above, this is valid even when the target has
+    # not moved — a squash of an up-to-date PR still diverges. Fail closed
+    # if a human-authored commit on the remote PR would be lost.
+    if [ "${SKIP_REMOTE_REBASE}" = "false" ] \
+      && [ "${AGENT_HISTORY_REWRITTEN}" = "true" ] \
+      && [ "${HUMAN_HISTORY_REWRITE_REQUESTED}" = "true" ] \
+      && git rev-parse --verify "origin/${TARGET_BRANCH}" >/dev/null 2>&1 \
+      && git merge-base --is-ancestor "origin/${TARGET_BRANCH}" HEAD 2>/dev/null \
+      && ! git merge-base --is-ancestor "origin/${BRANCH}" HEAD 2>/dev/null; then
+      if history_rewrite_preserves_remote_human_commits; then
+        SKIP_REMOTE_REBASE=true
+        echo "Local HEAD has rewritten authorized agent history and has diverged from origin/${BRANCH} — skipping rebase onto origin/${BRANCH} to preserve the agent history rewrite"
+      else
+        post_fail_to_pr push-rejected \
+          "Refusing to publish history rewrite: a human-authored commit on origin/${BRANCH} is not an ancestor of local HEAD, or the agent git identity is unavailable. The authorized range is the contiguous fix-agent suffix at HEAD; human-authored commits must be preserved."
+      fi
+    fi
     if [ "${SKIP_REMOTE_REBASE}" = "false" ]; then
       echo "Rebasing local ${BRANCH} onto origin/${BRANCH}..."
       REBASE_OUTPUT="$(git rebase "origin/${BRANCH}" 2>&1)" && REBASE_RC=0 || REBASE_RC=$?
@@ -464,9 +526,10 @@ ${REBASE_OUTPUT}"
   fi
 
   # Plain push first. Falls back to --force-with-lease when the push
-  # is rejected (non-fast-forward), which happens after a rebase — the
-  # agent rewrote history so the remote branch diverged. force-with-lease
-  # is safe: it still rejects if someone else pushed in the meantime.
+  # is rejected (non-fast-forward), which happens after a rebase, squash,
+  # or reset — the agent rewrote history so the remote branch diverged.
+  # force-with-lease is safe: it still rejects if someone else pushed in
+  # the meantime.
   echo "Pushing branch ${BRANCH}..."
   PUSH_OUTPUT="$(git push -u origin -- "${BRANCH}" 2>&1)" && PUSH_RC=0 || PUSH_RC=$?
   print_sanitized_gha_log "${PUSH_OUTPUT}"

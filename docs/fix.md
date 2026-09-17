@@ -41,6 +41,12 @@ command. The text gives you direct control over what to fix:
 - `/fs-fix rebase` / `/fs-fix rebase onto main` — rebase the PR onto its
   target branch ([details](#rebasing-a-stale-pr))
 - `/fs-fix fix merge conflicts` — rebase onto the target and resolve conflicts
+- `/fs-fix squash` / `/fs-fix squash these commits` — squash the contiguous
+  fix-agent commits at HEAD into one commit
+  ([details](#squashing-or-redoing-fix-agent-commits))
+- `/fs-fix redo from scratch` / `/fs-fix start over` — discard the
+  contiguous fix-agent commits at HEAD and redo that work
+  ([details](#squashing-or-redoing-fix-agent-commits))
 
 `/fs-fix-stop` adds the `fullsend-no-fix` label to the PR, preventing any
 further automatic fix runs. Manual `/fs-fix` commands still work.
@@ -102,6 +108,28 @@ rebases the PR branch onto the target; the post-script force-pushes with
 The agent rebases only when a human `/fs-fix` instruction asks for a rebase
 or for resolving merge conflicts with the target. Automatic review-triggered
 fixes do not rebase. An already-up-to-date branch is a no-op.
+
+The agent does not push. History rewrite is local; the post-script is what
+updates the remote PR branch.
+
+### Squashing or redoing fix-agent commits
+
+When fix-agent iterations have stacked noisy commits, comment
+`/fs-fix squash` (or `/fs-fix squash these commits`) to collapse the
+contiguous fix-agent commits at HEAD into one commit. Comment
+`/fs-fix redo from scratch` (or `/fs-fix start over`) to discard that
+suffix and redo the work. The post-script force-pushes with
+`--force-with-lease`.
+
+The agent rewrites only the contiguous suffix of commits it authored.
+Human-authored commits and the original code-agent commits below that
+suffix are preserved. If the authorized range cannot be determined — HEAD
+is not a fix-agent commit, ownership is mixed in a way that is ambiguous,
+or squash and redo are requested together — the agent fails closed and
+explains the blocker rather than rewriting.
+
+Automatic review-triggered fixes do not squash or reset. Without an
+explicit human request, the agent continues to append commits.
 
 The agent does not push. History rewrite is local; the post-script is what
 updates the remote PR branch.
