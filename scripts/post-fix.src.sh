@@ -400,13 +400,28 @@ if ! is_bot_user "${TRIGGER_SOURCE}" && is_human_history_rewrite_request "${HUMA
   HUMAN_HISTORY_REWRITE_REQUESTED=true
 fi
 
-# history_rewrite_preserves_remote_human_commits — 0 when every non-bot
-# commit on origin/BRANCH since it diverged from origin/TARGET_BRANCH is
-# still an ancestor of local HEAD. Fail closed when the agent identity is
-# unknown (cannot tell humans from bots) or when a human commit would be
-# lost by publishing the rewrite.
+# The fix agent's own git identity (harness/fix.yaml sets GIT_AUTHOR_NAME to
+# this literal for the sandbox). GIT_BOT_EMAIL alone is not sufficient to
+# identify fix-agent commits: harness/code.yaml gives the code agent the
+# same ${GIT_BOT_EMAIL}, differing only by name (fullsend-code). This
+# script runs on the runner, which does not inherit the sandbox's
+# GIT_AUTHOR_NAME, so the fix-agent identity is hardcoded here rather than
+# read from the environment.
+FIX_AGENT_GIT_NAME="fullsend-fix"
+
+# history_rewrite_preserves_remote_human_commits — 0 when every commit on
+# origin/BRANCH since it diverged from origin/TARGET_BRANCH that is NOT
+# authored by this fix agent (email + name, not email alone — see
+# FIX_AGENT_GIT_NAME above) is still present in local HEAD, either as an
+# exact-SHA ancestor or as an equivalent (same tree + same author identity)
+# commit. The equivalence fallback tolerates GitLab MR reconstruction,
+# where local history is rebuilt from API content and gets different commit
+# SHAs even when the tree/author content is identical. Fail closed when the
+# agent identity is unknown (cannot tell humans/code-agent from this fix
+# agent) or when a non-fix-agent commit would be lost by publishing the
+# rewrite.
 history_rewrite_preserves_remote_human_commits() {
-  local bot remote_ref target_ref mb sha author_email
+  local bot remote_ref target_ref mb sha author_email author_name tree
   bot="$(signoff_bot_email)"
   if [ -z "${bot}" ]; then
     echo "history-rewrite: agent git identity unavailable; refusing to publish rewrite" >&2
@@ -420,9 +435,15 @@ history_rewrite_preserves_remote_human_commits() {
   }
   for sha in $(git rev-list "${mb}..${remote_ref}" 2>/dev/null || true); do
     author_email="$(git log -1 --format='%ae' "${sha}" 2>/dev/null)"
-    if [ "${author_email}" != "${bot}" ]; then
-      if ! git merge-base --is-ancestor "${sha}" HEAD 2>/dev/null; then
-        echo "history-rewrite: human-authored commit ${sha} on ${remote_ref} is not an ancestor of HEAD" >&2
+    author_name="$(git log -1 --format='%an' "${sha}" 2>/dev/null)"
+    if [ "${author_email}" != "${bot}" ] || [ "${author_name}" != "${FIX_AGENT_GIT_NAME}" ]; then
+      if git merge-base --is-ancestor "${sha}" HEAD 2>/dev/null; then
+        continue
+      fi
+      tree="$(git log -1 --format='%T' "${sha}" 2>/dev/null)"
+      if [ -z "${tree}" ] || ! git log --format='%T %an %ae' HEAD 2>/dev/null \
+          | grep -qF "${tree} ${author_name} ${author_email}"; then
+        echo "history-rewrite: commit ${sha} (author ${author_name} <${author_email}>) on ${remote_ref} is not an ancestor of HEAD and has no equivalent (tree+author) commit in HEAD" >&2
         return 1
       fi
     fi
@@ -490,18 +511,51 @@ if [ "${NO_PUSH}" = "false" ]; then
     # Unlike the rebase skip above, this is valid even when the target has
     # not moved — a squash of an up-to-date PR still diverges. Fail closed
     # if a human-authored commit on the remote PR would be lost.
+    #
+    # Unlike the rebase skip's origin/TARGET_BRANCH-is-ancestor-of-HEAD
+    # requirement, a squash/redo does not rebase onto the target — it only
+    # rewrites the fix-agent suffix in place on top of the PR's original
+    # fork point. Requiring the (possibly since-advanced) TARGET_BRANCH to
+    # be an ancestor of HEAD would wrongly fail here whenever the target
+    # has moved on, falling through to a rebase onto the stale remote tip
+    # and silently undoing the requested rewrite. Use the PR's recorded
+    # fork point instead — the merge-base of the two remote refs, which is
+    # unaffected both by the local rewrite and by TARGET_BRANCH's later
+    # advancement.
+    REWRITE_FORK_POINT="$(git merge-base "origin/${TARGET_BRANCH}" "origin/${BRANCH}" 2>/dev/null)" || REWRITE_FORK_POINT=""
     if [ "${SKIP_REMOTE_REBASE}" = "false" ] \
       && [ "${AGENT_HISTORY_REWRITTEN}" = "true" ] \
       && [ "${HUMAN_HISTORY_REWRITE_REQUESTED}" = "true" ] \
-      && git rev-parse --verify "origin/${TARGET_BRANCH}" >/dev/null 2>&1 \
-      && git merge-base --is-ancestor "origin/${TARGET_BRANCH}" HEAD 2>/dev/null \
+      && [ -n "${REWRITE_FORK_POINT}" ] \
+      && git merge-base --is-ancestor "${REWRITE_FORK_POINT}" HEAD 2>/dev/null \
       && ! git merge-base --is-ancestor "origin/${BRANCH}" HEAD 2>/dev/null; then
-      if history_rewrite_preserves_remote_human_commits; then
-        SKIP_REMOTE_REBASE=true
-        echo "Local HEAD has rewritten authorized agent history and has diverged from origin/${BRANCH} — skipping rebase onto origin/${BRANCH} to preserve the agent history rewrite"
+      # This topology alone (diverged from origin/BRANCH, still contains
+      # the fork point) is also what a GitLab MR reconstruction produces
+      # with no rewrite at all — reconstructed commits get new SHAs even
+      # when nothing actually changed. Copying the rebase skip's "target
+      # moved past the remote tip" check would reject legitimate
+      # up-to-date squashes, so require a rewrite-specific structural
+      # signal instead: either the rewritten range has fewer commits than
+      # the remote range (a squash) or HEAD's final tree differs from
+      # origin/BRANCH's (a redo). If neither holds, local HEAD is
+      # structurally indistinguishable from a reconstruction of
+      # origin/BRANCH, so fall through to the ordinary rebase below rather
+      # than skip it.
+      REWRITE_LOCAL_COUNT="$(git rev-list --count "${REWRITE_FORK_POINT}..HEAD" 2>/dev/null)" || REWRITE_LOCAL_COUNT="0"
+      REWRITE_REMOTE_COUNT="$(git rev-list --count "${REWRITE_FORK_POINT}..origin/${BRANCH}" 2>/dev/null)" || REWRITE_REMOTE_COUNT="0"
+      REWRITE_LOCAL_TREE="$(git rev-parse "HEAD^{tree}" 2>/dev/null)" || REWRITE_LOCAL_TREE=""
+      REWRITE_REMOTE_TREE="$(git rev-parse "origin/${BRANCH}^{tree}" 2>/dev/null)" || REWRITE_REMOTE_TREE=""
+      if [ "${REWRITE_LOCAL_COUNT}" -lt "${REWRITE_REMOTE_COUNT}" ] \
+        || [ "${REWRITE_LOCAL_TREE}" != "${REWRITE_REMOTE_TREE}" ]; then
+        if history_rewrite_preserves_remote_human_commits; then
+          SKIP_REMOTE_REBASE=true
+          echo "Local HEAD has rewritten authorized agent history and has diverged from origin/${BRANCH} — skipping rebase onto origin/${BRANCH} to preserve the agent history rewrite"
+        else
+          post_fail_to_pr push-rejected \
+            "Refusing to publish history rewrite: a human-authored commit on origin/${BRANCH} is not an ancestor of local HEAD, or the agent git identity is unavailable. The authorized range is the contiguous fix-agent suffix at HEAD; human-authored commits must be preserved."
+        fi
       else
-        post_fail_to_pr push-rejected \
-          "Refusing to publish history rewrite: a human-authored commit on origin/${BRANCH} is not an ancestor of local HEAD, or the agent git identity is unavailable. The authorized range is the contiguous fix-agent suffix at HEAD; human-authored commits must be preserved."
+        echo "history_rewritten is set but local HEAD is structurally indistinguishable from origin/${BRANCH} (same commit count and tree) — treating as a GitLab reconstruction rather than a genuine rewrite, and falling through to rebase onto origin/${BRANCH}"
       fi
     fi
     if [ "${SKIP_REMOTE_REBASE}" = "false" ]; then

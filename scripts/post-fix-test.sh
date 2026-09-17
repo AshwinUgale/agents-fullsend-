@@ -2709,6 +2709,316 @@ run_push_history_rewrite_refuses_lost_human_commit_test() {
   echo "PASS: ${test_name}"
 }
 
+# Fail-closed: agent resets past a code-agent commit that shares the bot
+# email with the fix agent — harness/fix.yaml and harness/code.yaml both set
+# GIT_AUTHOR_EMAIL/GIT_COMMITTER_EMAIL to the same GIT_BOT_EMAIL, differing
+# only by GIT_AUTHOR_NAME (fullsend-fix vs fullsend-code). An email-only
+# droppable classification would treat this code-agent commit as the fix
+# agent's own no-op work and let the redo silently discard the code agent's
+# original PR contribution (fail-open finding on PR #1335).
+run_push_history_rewrite_refuses_lost_code_agent_commit_test() {
+  local test_name="push-history-rewrite-refuses-lost-code-agent-commit"
+  local base="${PUSH_REBASE_TMPDIR}/${test_name}"
+  mkdir -p "${base}"
+  local bot_email="bot@example.com"
+
+  git init -q --bare -b main "${base}/remote.git"
+  git init -q -b main "${base}/seed"
+  push_rebase_ident "${base}/seed"
+  echo "base" > "${base}/seed/file.txt"
+  git -C "${base}/seed" add file.txt
+  git -C "${base}/seed" commit -q -m "init"
+  git -C "${base}/seed" remote add origin "${base}/remote.git"
+  git -C "${base}/seed" push -q -u origin main
+
+  git -C "${base}/seed" checkout -q -b agent/99-test-fix
+  echo "code" > "${base}/seed/code.txt"
+  git -C "${base}/seed" add code.txt
+  commit_as "${base}/seed" "${bot_email}" "fullsend-code" "feat: code agent work"
+  echo "f1" > "${base}/seed/file.txt"
+  git -C "${base}/seed" add file.txt
+  commit_as "${base}/seed" "${bot_email}" "fullsend-fix" "fix: attempt 1"
+  git -C "${base}/seed" push -q -u origin agent/99-test-fix
+  local remote_tip
+  remote_tip="$(git -C "${base}/seed" rev-parse HEAD)"
+
+  git clone -q "${base}/remote.git" "${base}/repo"
+  push_rebase_ident "${base}/repo"
+  git -C "${base}/repo" checkout -q agent/99-test-fix
+  git -C "${base}/repo" reset -q --hard origin/main
+  echo "gone" > "${base}/repo/file.txt"
+  git -C "${base}/repo" add file.txt
+  commit_as "${base}/repo" "${bot_email}" "fullsend-fix" "fix: redo past code agent"
+
+  write_history_rewritten_result "${base}/iteration-1/output"
+
+  local stdout_log="${PUSH_REBASE_TMPDIR}/stdout-${test_name}.log"
+  local exit_code=0
+  GIT_BOT_EMAIL="${bot_email}" \
+    run_push_rebase_postfix "${base}" "${stdout_log}" "${PUSH_REBASE_MOCK_BIN}" \
+    "test-user" "redo from scratch" || exit_code=$?
+
+  if [ "${exit_code}" -eq 0 ]; then
+    echo "FAIL: ${test_name} — expected non-zero exit when a code-agent commit would be lost"
+    cat "${stdout_log}"
+    FAILURES=$((FAILURES + 1))
+    return
+  fi
+  if ! grep -q "fullsend-code" "${stdout_log}"; then
+    echo "FAIL: ${test_name} — missing fail-closed message naming the lost code-agent commit"
+    cat "${stdout_log}"
+    FAILURES=$((FAILURES + 1))
+    return
+  fi
+  local after
+  after="$(git --git-dir="${base}/remote.git" rev-parse refs/heads/agent/99-test-fix)"
+  if [ "${after}" != "${remote_tip}" ]; then
+    echo "FAIL: ${test_name} — remote branch moved despite fail-closed rewrite"
+    echo "  want ${remote_tip}, got ${after}"
+    FAILURES=$((FAILURES + 1))
+    return
+  fi
+  echo "PASS: ${test_name}"
+}
+
+# Target branch advances after the PR was opened, and the agent squashes
+# only the fix-agent suffix in place (not rebased onto the new target). The
+# fork point (merge-base of the two remote refs) still identifies the PR's
+# original base even though origin/main is no longer an ancestor of the
+# squashed HEAD — see the logic-error finding on PR #1335 at
+# post-fix.src.sh:494.
+run_push_history_rewrite_preserves_squash_target_advanced_test() {
+  local test_name="push-history-rewrite-preserves-squash-target-advanced"
+  local base="${PUSH_REBASE_TMPDIR}/${test_name}"
+  mkdir -p "${base}"
+  local bot_email="bot@example.com"
+
+  git init -q --bare -b main "${base}/remote.git"
+  git init -q -b main "${base}/seed"
+  push_rebase_ident "${base}/seed"
+  echo "base" > "${base}/seed/file.txt"
+  git -C "${base}/seed" add file.txt
+  commit_as "${base}/seed" "${bot_email}" "fullsend-code" "init"
+  git -C "${base}/seed" remote add origin "${base}/remote.git"
+  git -C "${base}/seed" push -q -u origin main
+
+  git -C "${base}/seed" checkout -q -b agent/99-test-fix
+  echo "f1" > "${base}/seed/file.txt"
+  git -C "${base}/seed" add file.txt
+  commit_as "${base}/seed" "${bot_email}" "fullsend-fix" "fix: attempt 1"
+  echo "f2" > "${base}/seed/file.txt"
+  git -C "${base}/seed" add file.txt
+  commit_as "${base}/seed" "${bot_email}" "fullsend-fix" "fix: attempt 2"
+  git -C "${base}/seed" push -q -u origin agent/99-test-fix
+
+  # Target moves on after the PR branch was built.
+  git -C "${base}/seed" checkout -q main
+  echo "ahead" > "${base}/seed/other.txt"
+  git -C "${base}/seed" add other.txt
+  commit_as "${base}/seed" "${bot_email}" "fullsend-code" "main ahead"
+  git -C "${base}/seed" push -q origin main
+
+  git clone -q "${base}/remote.git" "${base}/repo"
+  push_rebase_ident "${base}/repo"
+  git -C "${base}/repo" checkout -q agent/99-test-fix
+  # Squash the fix-agent suffix in place — NOT rebased onto the advanced main.
+  local fork_point
+  fork_point="$(git -C "${base}/repo" merge-base origin/main HEAD)"
+  git -C "${base}/repo" reset -q --soft "${fork_point}"
+  commit_as "${base}/repo" "${bot_email}" "fullsend-fix" "fix: squashed fix-agent commits"
+
+  write_history_rewritten_result "${base}/iteration-1/output"
+
+  local stdout_log="${PUSH_REBASE_TMPDIR}/stdout-${test_name}.log"
+  local exit_code=0
+  GIT_BOT_EMAIL="${bot_email}" \
+    run_push_rebase_postfix "${base}" "${stdout_log}" "${PUSH_REBASE_MOCK_BIN}" \
+    "test-user" "squash these commits" || exit_code=$?
+
+  if [ "${exit_code}" -ne 0 ]; then
+    echo "FAIL: ${test_name} — exit code ${exit_code}"
+    cat "${stdout_log}"
+    FAILURES=$((FAILURES + 1))
+    return
+  fi
+  if ! grep -q "skipping rebase onto origin/agent/99-test-fix to preserve the agent history rewrite" "${stdout_log}"; then
+    echo "FAIL: ${test_name} — expected skip of rebase onto origin/BRANCH even though the target advanced"
+    cat "${stdout_log}"
+    FAILURES=$((FAILURES + 1))
+    return
+  fi
+  local remote_count
+  remote_count="$(git --git-dir="${base}/remote.git" rev-list --count refs/heads/main..refs/heads/agent/99-test-fix)"
+  if [ "${remote_count}" != "1" ]; then
+    echo "FAIL: ${test_name} — expected 1 commit on the PR after squash, got ${remote_count}"
+    git --git-dir="${base}/remote.git" log --oneline refs/heads/agent/99-test-fix
+    FAILURES=$((FAILURES + 1))
+    return
+  fi
+  local remote_content
+  remote_content="$(git --git-dir="${base}/remote.git" show refs/heads/agent/99-test-fix:file.txt)"
+  if [ "${remote_content}" != "f2" ]; then
+    echo "FAIL: ${test_name} — remote file.txt is '${remote_content}', want 'f2'"
+    FAILURES=$((FAILURES + 1))
+    return
+  fi
+  echo "PASS: ${test_name}"
+}
+
+# A GitLab MR reconstruction can produce the exact same topology the
+# squash/redo skip checks for (diverged from origin/BRANCH, still contains
+# the fork point) even when no rewrite happened at all — reconstructed
+# commits get new SHAs from API content even when nothing changed. The skip
+# must require a rewrite-specific structural signal (fewer commits, or a
+# different final tree), not topology alone — see the logic-error finding
+# on PR #1335 at post-fix.src.sh:495.
+run_push_history_rewrite_indistinguishable_from_reconstruction_test() {
+  local test_name="push-history-rewrite-indistinguishable-from-reconstruction"
+  local base="${PUSH_REBASE_TMPDIR}/${test_name}"
+  mkdir -p "${base}"
+  local bot_email="bot@example.com"
+
+  git init -q --bare -b main "${base}/remote.git"
+  git init -q -b main "${base}/seed"
+  push_rebase_ident "${base}/seed"
+  echo "base" > "${base}/seed/file.txt"
+  git -C "${base}/seed" add file.txt
+  commit_as "${base}/seed" "${bot_email}" "fullsend-code" "init"
+  git -C "${base}/seed" remote add origin "${base}/remote.git"
+  git -C "${base}/seed" push -q -u origin main
+
+  git -C "${base}/seed" checkout -q -b agent/99-test-fix
+  echo "f1" > "${base}/seed/file.txt"
+  git -C "${base}/seed" add file.txt
+  commit_as "${base}/seed" "${bot_email}" "fullsend-fix" "fix: attempt 1"
+  echo "f2" > "${base}/seed/file.txt"
+  git -C "${base}/seed" add file.txt
+  commit_as "${base}/seed" "${bot_email}" "fullsend-fix" "fix: attempt 2"
+  git -C "${base}/seed" push -q -u origin agent/99-test-fix
+  local real_tip
+  real_tip="$(git -C "${base}/seed" rev-parse HEAD)"
+
+  git clone -q "${base}/remote.git" "${base}/repo"
+  push_rebase_ident "${base}/repo"
+  # Reconstruct the SAME two commits from API content: identical trees and
+  # commit count, but different SHAs — no rewrite actually happened.
+  git -C "${base}/repo" checkout -q -B agent/99-test-fix origin/main
+  echo "f1" > "${base}/repo/file.txt"
+  git -C "${base}/repo" add file.txt
+  commit_as "${base}/repo" "${bot_email}" "fullsend-fix" "fix: attempt 1"
+  echo "f2" > "${base}/repo/file.txt"
+  git -C "${base}/repo" add file.txt
+  commit_as "${base}/repo" "${bot_email}" "fullsend-fix" "fix: attempt 2"
+
+  write_history_rewritten_result "${base}/iteration-1/output"
+
+  local stdout_log="${PUSH_REBASE_TMPDIR}/stdout-${test_name}.log"
+  local exit_code=0
+  GIT_BOT_EMAIL="${bot_email}" \
+    run_push_rebase_postfix "${base}" "${stdout_log}" "${PUSH_REBASE_MOCK_BIN}" \
+    "test-user" "squash these commits" || exit_code=$?
+
+  if [ "${exit_code}" -ne 0 ]; then
+    echo "FAIL: ${test_name} — exit code ${exit_code}"
+    cat "${stdout_log}"
+    FAILURES=$((FAILURES + 1))
+    return
+  fi
+  if grep -q "skipping rebase onto origin/agent/99-test-fix to preserve the agent history rewrite" "${stdout_log}"; then
+    echo "FAIL: ${test_name} — skipped replay even though local HEAD is structurally indistinguishable from a reconstruction (same commit count and tree)"
+    cat "${stdout_log}"
+    FAILURES=$((FAILURES + 1))
+    return
+  fi
+  if ! git --git-dir="${base}/remote.git" merge-base --is-ancestor \
+       "${real_tip}" refs/heads/agent/99-test-fix; then
+    echo "FAIL: ${test_name} — remote tip is not a fast-forward of the real remote tip"
+    git --git-dir="${base}/remote.git" log --oneline refs/heads/agent/99-test-fix
+    FAILURES=$((FAILURES + 1))
+    return
+  fi
+  echo "PASS: ${test_name}"
+}
+
+# GitLab-reconstruction-style: the remote human commit is reconstructed
+# locally with a different SHA (different commit message/date) but the same
+# tree and author identity. Exact-SHA ancestry would fail closed here even
+# though no content is actually lost; the tree+author equivalence fallback
+# must accept it — see the logic-error finding on PR #1335 at
+# post-fix.src.sh:426.
+run_push_history_rewrite_preserves_reconstructed_human_commit_test() {
+  local test_name="push-history-rewrite-preserves-reconstructed-human-commit"
+  local base="${PUSH_REBASE_TMPDIR}/${test_name}"
+  mkdir -p "${base}"
+  local bot_email="bot@example.com"
+  local human_email="human@example.com"
+
+  git init -q --bare -b main "${base}/remote.git"
+  git init -q -b main "${base}/seed"
+  push_rebase_ident "${base}/seed"
+  echo "base" > "${base}/seed/file.txt"
+  git -C "${base}/seed" add file.txt
+  git -C "${base}/seed" commit -q -m "init"
+  git -C "${base}/seed" remote add origin "${base}/remote.git"
+  git -C "${base}/seed" push -q -u origin main
+
+  git -C "${base}/seed" checkout -q -b agent/99-test-fix
+  echo "human" > "${base}/seed/human.txt"
+  git -C "${base}/seed" add human.txt
+  commit_as "${base}/seed" "${human_email}" "Alice" "feat: human work"
+  echo "f1" > "${base}/seed/file.txt"
+  git -C "${base}/seed" add file.txt
+  commit_as "${base}/seed" "${bot_email}" "fullsend-fix" "fix: attempt 1"
+  echo "f2" > "${base}/seed/file.txt"
+  git -C "${base}/seed" add file.txt
+  commit_as "${base}/seed" "${bot_email}" "fullsend-fix" "fix: attempt 2"
+  git -C "${base}/seed" push -q -u origin agent/99-test-fix
+
+  git clone -q "${base}/remote.git" "${base}/repo"
+  push_rebase_ident "${base}/repo"
+  # Reconstruct the human commit from API content: same tree and author
+  # identity, but a different commit message/date gives it a different SHA
+  # than the one on the real remote. Then squash the two fix-agent commits
+  # into one, so the rewritten range (2 commits) is shorter than the
+  # remote range (3 commits) — a genuine rewrite, not just a reconstruction.
+  git -C "${base}/repo" checkout -q -B agent/99-test-fix origin/main
+  echo "human" > "${base}/repo/human.txt"
+  git -C "${base}/repo" add human.txt
+  commit_as "${base}/repo" "${human_email}" "Alice" "feat: human work (reconstructed)"
+  echo "f2" > "${base}/repo/file.txt"
+  git -C "${base}/repo" add file.txt
+  commit_as "${base}/repo" "${bot_email}" "fullsend-fix" "fix: squashed fix-agent commits"
+
+  write_history_rewritten_result "${base}/iteration-1/output"
+
+  local stdout_log="${PUSH_REBASE_TMPDIR}/stdout-${test_name}.log"
+  local exit_code=0
+  GIT_BOT_EMAIL="${bot_email}" \
+    run_push_rebase_postfix "${base}" "${stdout_log}" "${PUSH_REBASE_MOCK_BIN}" \
+    "test-user" "squash these commits" || exit_code=$?
+
+  if [ "${exit_code}" -ne 0 ]; then
+    echo "FAIL: ${test_name} — exit code ${exit_code}"
+    cat "${stdout_log}"
+    FAILURES=$((FAILURES + 1))
+    return
+  fi
+  if ! grep -q "skipping rebase onto origin/agent/99-test-fix to preserve the agent history rewrite" "${stdout_log}"; then
+    echo "FAIL: ${test_name} — expected skip of rebase onto origin/BRANCH"
+    cat "${stdout_log}"
+    FAILURES=$((FAILURES + 1))
+    return
+  fi
+  local human_file
+  human_file="$(git --git-dir="${base}/remote.git" show refs/heads/agent/99-test-fix:human.txt)"
+  if [ "${human_file}" != "human" ]; then
+    echo "FAIL: ${test_name} — human.txt is '${human_file}', want 'human'"
+    FAILURES=$((FAILURES + 1))
+    return
+  fi
+  echo "PASS: ${test_name}"
+}
+
 # history_rewritten:true from a bot-triggered run must not skip replay.
 run_push_history_rewrite_bot_trigger_ignores_marker_test() {
   local test_name="push-history-rewrite-bot-trigger-ignores-marker"
@@ -2856,6 +3166,10 @@ run_push_history_rewrite_preserves_redo_test
 run_push_history_rewrite_ordinary_append_test
 run_push_history_rewrite_preserves_human_suffix_test
 run_push_history_rewrite_refuses_lost_human_commit_test
+run_push_history_rewrite_refuses_lost_code_agent_commit_test
+run_push_history_rewrite_preserves_squash_target_advanced_test
+run_push_history_rewrite_indistinguishable_from_reconstruction_test
+run_push_history_rewrite_preserves_reconstructed_human_commit_test
 run_push_history_rewrite_bot_trigger_ignores_marker_test
 run_push_history_rewrite_non_rewrite_instruction_ignores_marker_test
 
