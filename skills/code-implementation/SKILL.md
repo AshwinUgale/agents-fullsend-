@@ -292,13 +292,15 @@ and `Glob` to inspect project configuration:
 
    **Priority rule:** classify **ticket-scope** whenever the docs,
    commitlint config, or CI require or prefer a ticket id in the title —
-   even when Conventional Commits or `config-conventional` is also cited.
-   Citing the Conventional Commits spec only establishes the
-   `type(scope): description` shape; it does not by itself mean scope must
-   be an area noun, and commitlint's stock `config-conventional` preset
-   does not restrict `scope` to area nouns either. Classify **area-scope**
-   only when the guidance affirmatively requires an area noun as scope and
-   does not also accept ticket ids as scope.
+   ticket-scope wins whenever any ticket-id preference exists, even when
+   Conventional Commits or `config-conventional` is also cited. The
+   Conventional Commits spec (v1.0.0, item 4) says a scope MUST consist
+   of a noun describing a section of the codebase, so a repo that follows
+   the spec and shows no ticket-id preference anywhere (docs, examples,
+   commitlint config, existing PR titles, CI) is **area-scope**.
+   Commitlint's stock `config-conventional` preset does not restrict
+   `scope` to area nouns, though. Classify **unknown** only when neither
+   signal is present.
 5. **Check for PR template.** Find the repo's pull request template(s).
    If multiple templates exist, note them — you will select the right
    one in step 10d after classifying the task type. If found, read and
@@ -978,7 +980,7 @@ The commit message must:
   the commit subject as the PR title.
   - **ticket-scope / unknown:** `<type>(#<number>): <description>` (or a
     Jira key from the issue title/body: `<type>(PROJ-123): ...`).
-  - **area-scope** (CC spec / `config-conventional`): use a codebase-area
+  - **area-scope** (per the step 4 classification): use a codebase-area
     noun (`feat(ui):`, `fix(parser):`). Put the issue in the body trailer.
     Set `inject_issue_scope: false` in agent-result.json.
 - **Reference the issue number in the body.** If your implementation
