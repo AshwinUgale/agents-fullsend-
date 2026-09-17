@@ -2350,8 +2350,10 @@ CLOSES_ISSUE="true"
 INJECT_ISSUE_SCOPE="true"
 if [ -n "${RESULT_FILE}" ]; then
   AGENT_TARGET="$(jq -r '.target_branch // empty' "${RESULT_FILE}" 2>/dev/null || true)"
-  AGENT_CLOSES="$(jq -r '.closes_issue // empty' "${RESULT_FILE}" 2>/dev/null || true)"
-  # Do not use jq `//` here: it treats JSON false as missing.
+  # Do not use jq `//` for the boolean opt-outs: it treats JSON false as
+  # missing, so `closes_issue: false` / `inject_issue_scope: false` would
+  # silently read as the default. Only the literal string "false" opts out.
+  AGENT_CLOSES="$(jq -r '.closes_issue' "${RESULT_FILE}" 2>/dev/null || true)"
   AGENT_INJECT="$(jq -r '.inject_issue_scope' "${RESULT_FILE}" 2>/dev/null || true)"
   if [ "${AGENT_CLOSES}" = "false" ]; then
     CLOSES_ISSUE="false"

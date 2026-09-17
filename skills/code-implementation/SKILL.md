@@ -968,7 +968,7 @@ The commit message must:
   title): `<type>(#<number>): <description>` for ticket-scope/unknown
   (or a Jira key: `<type>(PROJ-123): ...`); `<type>(<area>): <description>`
   for area-scope — put the issue in the body trailer and set
-  `inject_issue_scope: false`.
+  `inject_issue_scope: false` in the result file (step 10d).
 - **Reference the issue number in the body.** If your implementation
   fully addresses the issue scope, use `Closes #<number>`. If your
   implementation addresses only a subset of the issue (e.g., the triage
@@ -985,8 +985,8 @@ test -f .gitlint && cat .gitlint
 
 Most repos enforce a title length limit (commonly 72 characters). If
 `.gitlint` has `[title-max-length] line-length=72`, keep the title
-(first line) under that limit. Use a concise `<type>: <description>`
-that fits.
+(first line) under that limit: keep the classified scope (ticket or
+area) and shorten only the `<description>`.
 
 **Body line length — comply with the repo's gitlint config:**
 
@@ -1100,21 +1100,19 @@ jq --arg pb "$pr_body" '. + {pr_body: $pb}' \
   && mv "${FULLSEND_OUTPUT_DIR}/agent-result.json.tmp" "${FULLSEND_OUTPUT_DIR}/agent-result.json"
 ```
 
-**Closing reference:** If your implementation addresses only a subset of
-the issue scope, add `closes_issue: false` to the result file so the
-post-script uses `Related to` instead of `Closes` in the PR body:
+**Opt-out flags** (default `true`):
+
+- `closes_issue: false` for a partial implementation: the post-script
+  writes `Related to` instead of `Closes`.
+- `inject_issue_scope: false` on area-scope repos: no `(#<number>)`
+  title injection.
 
 ```bash
 jq '. + {closes_issue: false}' \
   "${FULLSEND_OUTPUT_DIR}/agent-result.json" > "${FULLSEND_OUTPUT_DIR}/agent-result.json.tmp" \
   && mv "${FULLSEND_OUTPUT_DIR}/agent-result.json.tmp" "${FULLSEND_OUTPUT_DIR}/agent-result.json"
+# same pattern for inject_issue_scope: jq '. + {inject_issue_scope: false}' ...
 ```
-
-If your implementation fully addresses the issue, omit this field — the
-default is `true` (the post-script appends `Closes`).
-
-If **area-scope**, also set `inject_issue_scope: false` to skip the
-`(#<number>)` injection.
 
 ### 11. Validate structured output
 
@@ -1137,7 +1135,8 @@ optionally `pr_body`, `closes_issue`, and `inject_issue_scope`:
 ```json
 {
   "target_branch": "main",
-  "pr_body": "## Summary\n\nWhat changed and why.\n\n## Testing\n\nHow it was tested."
+  "pr_body": "## Summary\n\nWhat changed and why.\n\n## Testing\n\nHow it was tested.",
+  "inject_issue_scope": false
 }
 ```
 

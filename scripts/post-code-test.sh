@@ -247,6 +247,36 @@ else
   echo "PASS: inject-issue-scope-false-reads-false"
 fi
 
+# closes_issue is read the same way: jq `//` would turn JSON false into
+# "empty", so a partial implementation's opt-out would be lost.
+resolve_closes_issue() {
+  local value
+  value="$(printf '%s' "$1" | jq -r '.closes_issue')"
+  if [ "${value}" = "false" ]; then echo "false"; else echo "true"; fi
+}
+
+if [ "$(resolve_closes_issue '{"target_branch":"main"}')" != "true" ]; then
+  echo "FAIL: closes-issue-absent-defaults-true"
+  FAILURES=$((FAILURES + 1))
+else
+  echo "PASS: closes-issue-absent-defaults-true"
+fi
+
+if [ "$(resolve_closes_issue '{"target_branch":"main","closes_issue":false}')" != "false" ]; then
+  echo "FAIL: closes-issue-false-reads-false"
+  FAILURES=$((FAILURES + 1))
+else
+  echo "PASS: closes-issue-false-reads-false"
+fi
+
+if grep -q "closes_issue // empty" "${POST_SCRIPT}"; then
+  echo "FAIL: bundled-script-reads-closes-issue-without-jq-alternative"
+  echo "  ${POST_SCRIPT} still parses closes_issue with jq //, which drops JSON false"
+  FAILURES=$((FAILURES + 1))
+else
+  echo "PASS: bundled-script-reads-closes-issue-without-jq-alternative"
+fi
+
 if ! grep -q 'inject_issue_scope' "${POST_SCRIPT}"; then
   echo "FAIL: bundled-script-has-inject-issue-scope"
   echo "  ${POST_SCRIPT} missing inject_issue_scope"
