@@ -2566,10 +2566,12 @@ run_push_history_rewrite_ordinary_append_test() {
   echo "PASS: ${test_name}"
 }
 
-# Mixed history: human commit below the fix-agent suffix is preserved when
-# the agent squashes only its own suffix.
+# Mixed history: a squash now targets the whole PR, so the human commit
+# below the fix-agent commits is combined into the single final commit
+# rather than kept separate (agents/fix.md "Rewrite fix-agent history" —
+# "the end result should be a single-commit PR").
 run_push_history_rewrite_preserves_human_suffix_test() {
-  local test_name="push-history-rewrite-preserves-human-below-suffix"
+  local test_name="push-history-rewrite-combines-human-and-fix-commits"
   local base="${PUSH_REBASE_TMPDIR}/${test_name}"
   mkdir -p "${base}"
   local bot_email="bot@example.com"
@@ -2588,8 +2590,6 @@ run_push_history_rewrite_preserves_human_suffix_test() {
   echo "human" > "${base}/seed/human.txt"
   git -C "${base}/seed" add human.txt
   commit_as "${base}/seed" "${human_email}" "Alice" "feat: human work"
-  local human_sha
-  human_sha="$(git -C "${base}/seed" rev-parse HEAD)"
   echo "f1" > "${base}/seed/file.txt"
   git -C "${base}/seed" add file.txt
   commit_as "${base}/seed" "${bot_email}" "fullsend-fix" "fix: attempt 1"
@@ -2601,8 +2601,10 @@ run_push_history_rewrite_preserves_human_suffix_test() {
   git clone -q "${base}/remote.git" "${base}/repo"
   push_rebase_ident "${base}/repo"
   git -C "${base}/repo" checkout -q agent/99-test-fix
-  git -C "${base}/repo" reset -q --soft "${human_sha}"
-  commit_as "${base}/repo" "${bot_email}" "fullsend-fix" "fix: squashed fix-agent commits"
+  # Whole-PR squash: reset to the merge base with the target, not to the
+  # human commit — the human commit is part of what gets combined.
+  git -C "${base}/repo" reset -q --soft origin/main
+  commit_as "${base}/repo" "${bot_email}" "fullsend-fix" "fix: squashed the whole PR"
 
   write_history_rewritten_result "${base}/iteration-1/output"
 
@@ -2624,10 +2626,11 @@ run_push_history_rewrite_preserves_human_suffix_test() {
     FAILURES=$((FAILURES + 1))
     return
   fi
-  if ! git --git-dir="${base}/remote.git" merge-base --is-ancestor \
-       "${human_sha}" refs/heads/agent/99-test-fix; then
-    echo "FAIL: ${test_name} — human-authored commit is not an ancestor of the pushed tip"
-    git --git-dir="${base}/remote.git" log --format='%h %ae %s' refs/heads/agent/99-test-fix
+  local remote_count
+  remote_count="$(git --git-dir="${base}/remote.git" rev-list --count refs/heads/main..refs/heads/agent/99-test-fix)"
+  if [ "${remote_count}" != "1" ]; then
+    echo "FAIL: ${test_name} — expected 1 commit on the PR after squash, got ${remote_count}"
+    git --git-dir="${base}/remote.git" log --oneline refs/heads/agent/99-test-fix
     FAILURES=$((FAILURES + 1))
     return
   fi
@@ -2635,6 +2638,80 @@ run_push_history_rewrite_preserves_human_suffix_test() {
   human_file="$(git --git-dir="${base}/remote.git" show refs/heads/agent/99-test-fix:human.txt)"
   if [ "${human_file}" != "human" ]; then
     echo "FAIL: ${test_name} — human.txt is '${human_file}', want 'human'"
+    FAILURES=$((FAILURES + 1))
+    return
+  fi
+  echo "PASS: ${test_name}"
+}
+
+# Squash fail-closed: the agent recorded history_rewritten:true for a squash
+# request, but the rewritten range still has more than one commit ahead of
+# the target — a partial squash. Per-commit preservation no longer applies
+# to squash (that check is not meaningful once commits are combined), but
+# the "single-commit PR" outcome is exactly what verifies a squash actually
+# did its job; a partial squash must be refused rather than force-pushed.
+run_push_history_rewrite_refuses_partial_squash_test() {
+  local test_name="push-history-rewrite-refuses-partial-squash"
+  local base="${PUSH_REBASE_TMPDIR}/${test_name}"
+  mkdir -p "${base}"
+  local bot_email="bot@example.com"
+
+  git init -q --bare -b main "${base}/remote.git"
+  git init -q -b main "${base}/seed"
+  push_rebase_ident "${base}/seed"
+  echo "base" > "${base}/seed/file.txt"
+  git -C "${base}/seed" add file.txt
+  commit_as "${base}/seed" "${bot_email}" "fullsend-code" "init"
+  git -C "${base}/seed" remote add origin "${base}/remote.git"
+  git -C "${base}/seed" push -q -u origin main
+
+  git -C "${base}/seed" checkout -q -b agent/99-test-fix
+  echo "f1" > "${base}/seed/file.txt"
+  git -C "${base}/seed" add file.txt
+  commit_as "${base}/seed" "${bot_email}" "fullsend-fix" "fix: attempt 1"
+  echo "f2" > "${base}/seed/file.txt"
+  git -C "${base}/seed" add file.txt
+  commit_as "${base}/seed" "${bot_email}" "fullsend-fix" "fix: attempt 2"
+  echo "f3" > "${base}/seed/file.txt"
+  git -C "${base}/seed" add file.txt
+  commit_as "${base}/seed" "${bot_email}" "fullsend-fix" "fix: attempt 3"
+  git -C "${base}/seed" push -q -u origin agent/99-test-fix
+  local remote_tip
+  remote_tip="$(git -C "${base}/seed" rev-parse HEAD)"
+
+  git clone -q "${base}/remote.git" "${base}/repo"
+  push_rebase_ident "${base}/repo"
+  git -C "${base}/repo" checkout -q agent/99-test-fix
+  # Partial squash: only the last two attempts are combined, leaving two
+  # commits ahead of main instead of one.
+  git -C "${base}/repo" reset -q --soft HEAD~2
+  commit_as "${base}/repo" "${bot_email}" "fullsend-fix" "fix: squashed attempts 2 and 3"
+
+  write_history_rewritten_result "${base}/iteration-1/output"
+
+  local stdout_log="${PUSH_REBASE_TMPDIR}/stdout-${test_name}.log"
+  local exit_code=0
+  GIT_BOT_EMAIL="${bot_email}" \
+    run_push_rebase_postfix "${base}" "${stdout_log}" "${PUSH_REBASE_MOCK_BIN}" \
+    "test-user" "squash these commits" || exit_code=$?
+
+  if [ "${exit_code}" -eq 0 ]; then
+    echo "FAIL: ${test_name} — expected non-zero exit for a squash that left more than one commit"
+    cat "${stdout_log}"
+    FAILURES=$((FAILURES + 1))
+    return
+  fi
+  if ! grep -q "must produce exactly one commit" "${stdout_log}"; then
+    echo "FAIL: ${test_name} — missing fail-closed message about the partial squash"
+    cat "${stdout_log}"
+    FAILURES=$((FAILURES + 1))
+    return
+  fi
+  local after
+  after="$(git --git-dir="${base}/remote.git" rev-parse refs/heads/agent/99-test-fix)"
+  if [ "${after}" != "${remote_tip}" ]; then
+    echo "FAIL: ${test_name} — remote branch moved despite fail-closed rewrite"
+    echo "  want ${remote_tip}, got ${after}"
     FAILURES=$((FAILURES + 1))
     return
   fi
@@ -2968,18 +3045,16 @@ JSONEOF
 
 # The ordinary success path agents/fix.md documents for a combined "rebase
 # and squash" instruction: the target has genuinely advanced with an
-# unrelated file change, the PR branch carries a human commit under the
-# fix-agent suffix, the agent rebases onto the new target and then squashes
-# only the fix-agent commits. A genuine rebase reapplies the human commit's
-# patch onto the advanced target, so the resulting commit's tree now also
-# contains the target's unrelated change — it can never be full-tree-
-# identical to the original, even though the human's own change was
-# preserved intact. history_rewrite_preserves_remote_human_commits must
-# recognize this via patch-id equivalence, not just full-tree equivalence
-# (which only ever matches an in-place GitLab reconstruction) — see the
-# high-severity logic-error finding on PR #1335 at post-fix.src.sh:443.
+# unrelated file change, the PR branch carries a human commit alongside the
+# fix-agent commits, and the agent rebases onto the new target and then
+# squashes the whole (rebased) PR range — human commit included — into one
+# commit. The resulting commit's tree contains the target's unrelated
+# change too (a real rebase reapplies every commit onto the new base), so
+# the human's own contribution survives only as content within the single
+# squashed commit, not as a separate commit — that is the point of a
+# whole-PR squash.
 run_push_history_rewrite_preserves_rebased_human_commit_test() {
-  local test_name="push-history-rewrite-preserves-rebased-human-commit"
+  local test_name="push-history-rewrite-squashes-whole-pr-after-rebase"
   local base="${PUSH_REBASE_TMPDIR}/${test_name}"
   mkdir -p "${base}"
   local bot_email="bot@example.com"
@@ -3022,12 +3097,9 @@ run_push_history_rewrite_preserves_rebased_human_commit_test() {
   # Genuine rebase: the human commit is replayed intact, but its resulting
   # tree now also contains other.txt from the advanced target.
   git -C "${base}/repo" rebase -q origin/main
-  # Squash only the fix-agent suffix on the rebased history.
-  local fork_point human_sha
-  fork_point="$(git -C "${base}/repo" merge-base origin/main HEAD)"
-  human_sha="$(git -C "${base}/repo" rev-list "${fork_point}..HEAD" | tail -1)"
-  git -C "${base}/repo" reset -q --soft "${human_sha}"
-  commit_as "${base}/repo" "${bot_email}" "fullsend-fix" "fix: squashed fix-agent commits"
+  # Squash the whole rebased PR range (human commit included) into one commit.
+  git -C "${base}/repo" reset -q --soft origin/main
+  commit_as "${base}/repo" "${bot_email}" "fullsend-fix" "fix: squashed the whole PR"
 
   mkdir -p "${base}/iteration-1/output"
   cat > "${base}/iteration-1/output/agent-result.json" <<'JSONEOF'
@@ -3061,6 +3133,14 @@ JSONEOF
   human_file="$(git --git-dir="${base}/remote.git" show refs/heads/agent/99-test-fix:human.txt)"
   if [ "${human_file}" != "human" ]; then
     echo "FAIL: ${test_name} — human.txt is '${human_file}', want 'human'"
+    FAILURES=$((FAILURES + 1))
+    return
+  fi
+  local remote_count
+  remote_count="$(git --git-dir="${base}/remote.git" rev-list --count refs/heads/main..refs/heads/agent/99-test-fix)"
+  if [ "${remote_count}" != "1" ]; then
+    echo "FAIL: ${test_name} — expected 1 commit on the PR after squash, got ${remote_count}"
+    git --git-dir="${base}/remote.git" log --oneline refs/heads/agent/99-test-fix
     FAILURES=$((FAILURES + 1))
     return
   fi
@@ -3336,14 +3416,18 @@ run_push_history_rewrite_indistinguishable_from_reconstruction_test() {
   echo "PASS: ${test_name}"
 }
 
-# GitLab-reconstruction-style: the remote human commit is reconstructed
-# locally with a different SHA (different commit message/date) but the same
-# tree and author identity. Exact-SHA ancestry would fail closed here even
-# though no content is actually lost; the tree+author equivalence fallback
-# must accept it — see the logic-error finding on PR #1335 at
-# post-fix.src.sh:426.
+# GitLab-reconstruction-style: the sandbox never fetches the real remote
+# branch, so it reconstructs the PR's content from API data under different
+# commit SHAs than the real remote (different messages/dates). A squash now
+# targets the whole PR as a single commit, so the reconstruction combines
+# every original change — including the human's — directly into that one
+# commit. Since squash verification no longer walks individual remote
+# commits looking for a preserved equivalent (that check does not apply to
+# a real squash at all, per PR #1335), this only needs the structural
+# "genuine rewrite" signal (fewer commits than the remote range) and the
+# "exactly one commit" outcome check to both hold.
 run_push_history_rewrite_preserves_reconstructed_human_commit_test() {
-  local test_name="push-history-rewrite-preserves-reconstructed-human-commit"
+  local test_name="push-history-rewrite-squashes-reconstructed-human-commit"
   local base="${PUSH_REBASE_TMPDIR}/${test_name}"
   mkdir -p "${base}"
   local bot_email="bot@example.com"
@@ -3372,18 +3456,17 @@ run_push_history_rewrite_preserves_reconstructed_human_commit_test() {
 
   git clone -q "${base}/remote.git" "${base}/repo"
   push_rebase_ident "${base}/repo"
-  # Reconstruct the human commit from API content: same tree and author
-  # identity, but a different commit message/date gives it a different SHA
-  # than the one on the real remote. Then squash the two fix-agent commits
-  # into one, so the rewritten range (2 commits) is shorter than the
-  # remote range (3 commits) — a genuine rewrite, not just a reconstruction.
+  # Reconstruct the PR's net content from API data as a single commit —
+  # different SHA/message than anything on the real remote, and the human
+  # commit's content is folded in rather than kept as its own commit. The
+  # rewritten range (1 commit) is shorter than the remote range (3 commits)
+  # — a genuine rewrite, not just a reconstruction of the same history.
   git -C "${base}/repo" checkout -q -B agent/99-test-fix origin/main
   echo "human" > "${base}/repo/human.txt"
   git -C "${base}/repo" add human.txt
-  commit_as "${base}/repo" "${human_email}" "Alice" "feat: human work (reconstructed)"
   echo "f2" > "${base}/repo/file.txt"
   git -C "${base}/repo" add file.txt
-  commit_as "${base}/repo" "${bot_email}" "fullsend-fix" "fix: squashed fix-agent commits"
+  commit_as "${base}/repo" "${bot_email}" "fullsend-fix" "fix: squashed the whole PR (reconstructed)"
 
   write_history_rewritten_result "${base}/iteration-1/output"
 
@@ -3402,6 +3485,14 @@ run_push_history_rewrite_preserves_reconstructed_human_commit_test() {
   if ! grep -q "skipping rebase onto origin/agent/99-test-fix to preserve the agent history rewrite" "${stdout_log}"; then
     echo "FAIL: ${test_name} — expected skip of rebase onto origin/BRANCH"
     cat "${stdout_log}"
+    FAILURES=$((FAILURES + 1))
+    return
+  fi
+  local remote_count
+  remote_count="$(git --git-dir="${base}/remote.git" rev-list --count refs/heads/main..refs/heads/agent/99-test-fix)"
+  if [ "${remote_count}" != "1" ]; then
+    echo "FAIL: ${test_name} — expected 1 commit on the PR after squash, got ${remote_count}"
+    git --git-dir="${base}/remote.git" log --oneline refs/heads/agent/99-test-fix
     FAILURES=$((FAILURES + 1))
     return
   fi
@@ -3558,6 +3649,7 @@ run_push_rebase_human_non_rebase_instruction_ignores_marker_test
 run_push_rebase_human_rebase_request_skips_stale_reconstruction_test
 run_push_rebase_preserves_agent_rebase_after_validation_retry_test
 run_push_history_rewrite_preserves_squash_test
+run_push_history_rewrite_refuses_partial_squash_test
 run_push_history_rewrite_preserves_redo_test
 run_push_history_rewrite_ordinary_append_test
 run_push_history_rewrite_preserves_human_suffix_test

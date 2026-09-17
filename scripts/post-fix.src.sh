@@ -400,6 +400,25 @@ if ! is_bot_user "${TRIGGER_SOURCE}" && is_human_history_rewrite_request "${HUMA
   HUMAN_HISTORY_REWRITE_REQUESTED=true
 fi
 
+# Squash and redo/reset verify differently below (agents/fix.md "Rewrite
+# fix-agent history"): a squash now targets the whole PR and must land as a
+# single commit, so per-commit preservation no longer applies to it, while
+# redo/reset still only discards the contiguous fix-agent suffix and must
+# still preserve every commit below it. Compute both independently — never
+# both true at once from a real single-phrase instruction, but an agent that
+# misreads an ambiguous combined request as history_rewritten:true must still
+# fall through to the stricter (preservation) path below, not the looser one.
+HUMAN_SQUASH_REQUESTED=false
+HUMAN_RESET_REQUESTED=false
+if ! is_bot_user "${TRIGGER_SOURCE}"; then
+  if is_human_squash_request "${HUMAN_INSTRUCTION:-}"; then
+    HUMAN_SQUASH_REQUESTED=true
+  fi
+  if is_human_reset_request "${HUMAN_INSTRUCTION:-}"; then
+    HUMAN_RESET_REQUESTED=true
+  fi
+fi
+
 # The fix agent's own git identity (harness/fix.yaml sets GIT_AUTHOR_NAME to
 # this literal for the sandbox). GIT_BOT_EMAIL alone is not sufficient to
 # identify fix-agent commits: harness/code.yaml gives the code agent the
@@ -603,11 +622,43 @@ if [ "${NO_PUSH}" = "false" ]; then
       REWRITE_REMOTE_TREE="$(git rev-parse "origin/${BRANCH}^{tree}" 2>/dev/null)" || REWRITE_REMOTE_TREE=""
       if [ "${REWRITE_LOCAL_COUNT}" -lt "${REWRITE_REMOTE_COUNT}" ] \
         || [ "${REWRITE_LOCAL_TREE}" != "${REWRITE_REMOTE_TREE}" ]; then
-        # A genuine rewrite is on HEAD. Verify it preserves every
-        # non-fix-agent remote commit — even if the rebase-skip above
-        # already authorized skipping replay for an unrelated reason
-        # (target-advance rebase). Refuse to publish on failure regardless.
-        if history_rewrite_preserves_remote_human_commits; then
+        # A genuine rewrite is on HEAD. What "safe" means depends on which
+        # rewrite was requested:
+        #
+        #   - Squash (and not also reset — an ambiguous combined phrase
+        #     falls through to the stricter redo/reset check below) now
+        #     targets the whole PR: fix-agent, code-agent, and human commits
+        #     alike are intentionally combined into one commit (agents/fix.md
+        #     "Rewrite fix-agent history" — "the end result should be a
+        #     single-commit PR"). Per-commit preservation is structurally
+        #     impossible to satisfy for a real squash of more than one
+        #     commit, so it is not the right safety property here. The
+        #     property that matters is that the promised outcome actually
+        #     happened: exactly one commit sits between the target branch
+        #     and HEAD. This also bounds what a "manual squash" (reset to
+        #     the merge base and hand-reimplement, used when squash+rebase
+        #     conflicts make a mechanical `git reset --soft` impractical)
+        #     could smuggle in: whatever it is, it is confined to the one
+        #     commit that already passed the secret scan and pre-commit
+        #     gate above.
+        #   - Redo/reset only discards the contiguous fix-agent suffix, so
+        #     every non-fix-agent commit below it must still be preserved
+        #     intact — same check as before.
+        # Refuse to publish on failure regardless — even if the rebase-skip
+        # above already authorized skipping replay for an unrelated reason
+        # (target-advance rebase).
+        if [ "${HUMAN_SQUASH_REQUESTED}" = "true" ] && [ "${HUMAN_RESET_REQUESTED}" = "false" ]; then
+          REWRITE_TARGET_COUNT="$(git rev-list --count "origin/${TARGET_BRANCH}..HEAD" 2>/dev/null)" || REWRITE_TARGET_COUNT="-1"
+          if [ "${REWRITE_TARGET_COUNT}" = "1" ]; then
+            if [ "${SKIP_REMOTE_REBASE}" = "false" ]; then
+              SKIP_REMOTE_REBASE=true
+              echo "Local HEAD has rewritten authorized agent history and has diverged from origin/${BRANCH} — skipping rebase onto origin/${BRANCH} to preserve the agent history rewrite"
+            fi
+          else
+            post_fail_to_pr push-rejected \
+              "Refusing to publish squash: a human /fs-fix squash request must produce exactly one commit ahead of origin/${TARGET_BRANCH} (the whole PR as a single commit), but found ${REWRITE_TARGET_COUNT}."
+          fi
+        elif history_rewrite_preserves_remote_human_commits; then
           if [ "${SKIP_REMOTE_REBASE}" = "false" ]; then
             SKIP_REMOTE_REBASE=true
             echo "Local HEAD has rewritten authorized agent history and has diverged from origin/${BRANCH} — skipping rebase onto origin/${BRANCH} to preserve the agent history rewrite"
