@@ -428,7 +428,7 @@ FIX_AGENT_GIT_NAME="fullsend-fix"
 # agent from this fix agent) or when a non-fix-agent commit would be lost
 # by publishing the rewrite.
 history_rewrite_preserves_remote_human_commits() {
-  local bot remote_ref target_ref mb sha author_email author_name tree patch_id candidate candidate_email candidate_patch_id
+  local bot remote_ref target_ref mb sha author_email author_name tree patch_id candidate candidate_name candidate_email candidate_patch_id
   bot="$(signoff_bot_email)"
   if [ -z "${bot}" ]; then
     echo "history-rewrite: agent git identity unavailable; refusing to publish rewrite" >&2
@@ -454,14 +454,24 @@ history_rewrite_preserves_remote_human_commits() {
       fi
       patch_id="$(git show "${sha}" 2>/dev/null | git patch-id --stable 2>/dev/null | awk '{print $1}')"
       if [ -n "${patch_id}" ]; then
-        for candidate in $(git log --format='%H' --author="${author_name}" HEAD 2>/dev/null); do
-          candidate_email="$(git log -1 --format='%ae' "${candidate}" 2>/dev/null)"
+        # Candidates are restricted to the range being published
+        # (target_ref..HEAD), not all of HEAD's ancestry: HEAD also
+        # contains target-branch history up to the fork point (the
+        # caller requires that fork point to be an ancestor of HEAD),
+        # and a same-author commit already inherited from the target
+        # branch proves nothing about whether this PR's own commit
+        # survived the rewrite. Matching is done with exact string
+        # equality on %an/%ae rather than `git log --author=`, which
+        # treats the name as an unanchored regex.
+        while IFS=$'\t' read -r candidate candidate_name candidate_email; do
+          [ -n "${candidate}" ] || continue
+          [ "${candidate_name}" = "${author_name}" ] || continue
           [ "${candidate_email}" = "${author_email}" ] || continue
           candidate_patch_id="$(git show "${candidate}" 2>/dev/null | git patch-id --stable 2>/dev/null | awk '{print $1}')"
           if [ -n "${candidate_patch_id}" ] && [ "${candidate_patch_id}" = "${patch_id}" ]; then
             continue 2
           fi
-        done
+        done < <(git log --format='%H%x09%an%x09%ae' "${target_ref}..HEAD" 2>/dev/null)
       fi
       echo "history-rewrite: commit ${sha} (author ${author_name} <${author_email}>) on ${remote_ref} is not an ancestor of HEAD and has no equivalent (tree+author or patch-id+author) commit in HEAD" >&2
       return 1

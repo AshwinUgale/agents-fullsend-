@@ -3073,6 +3073,103 @@ JSONEOF
   echo "PASS: ${test_name}"
 }
 
+# The patch-id fallback's candidate search must be scoped to the range
+# being published (origin/TARGET_BRANCH..HEAD), not all of HEAD's
+# ancestry — HEAD also contains target-branch history up to the fork
+# point, and a same-author, same-patch-id commit inherited from the
+# target branch proves nothing about whether the PR's own commit
+# survived the rewrite. Target history already has an older commit
+# (by the same human author) that adds foo.txt with content identical
+# to the PR's own later restore of that file; the agent then redoes
+# past its own restore. The unscoped candidate search would find the
+# older target-branch commit as a false "equivalent" and wrongly treat
+# the dropped PR commit as preserved — see the medium-severity
+# logic-error finding on PR #1335 at post-fix.src.sh:459.
+run_push_history_rewrite_refuses_target_history_patch_id_collision_test() {
+  local test_name="push-history-rewrite-refuses-target-history-patch-id-collision"
+  local base="${PUSH_REBASE_TMPDIR}/${test_name}"
+  mkdir -p "${base}"
+  local bot_email="bot@example.com"
+  local human_email="human@example.com"
+
+  git init -q --bare -b main "${base}/remote.git"
+  git init -q -b main "${base}/seed"
+  push_rebase_ident "${base}/seed"
+  echo "base" > "${base}/seed/file.txt"
+  git -C "${base}/seed" add file.txt
+  commit_as "${base}/seed" "${bot_email}" "fullsend-code" "init"
+  # Older same-author commit already in target history, with the exact
+  # patch the PR's own restore will later reintroduce. file.txt also
+  # changes here so this commit's full tree will differ from the PR's
+  # later restore commit below — the collision under test must be caught
+  # (or missed) by the patch-id fallback specifically, not the tree
+  # fallback, which already has its own coverage.
+  echo "restore-me" > "${base}/seed/foo.txt"
+  git -C "${base}/seed" add foo.txt
+  commit_as "${base}/seed" "${human_email}" "Alice" "feat: add foo"
+  git -C "${base}/seed" rm -q foo.txt
+  echo "removed-marker" > "${base}/seed/file.txt"
+  git -C "${base}/seed" add file.txt
+  commit_as "${base}/seed" "${bot_email}" "fullsend-code" "remove foo, bump marker"
+  git -C "${base}/seed" remote add origin "${base}/remote.git"
+  git -C "${base}/seed" push -q -u origin main
+
+  git -C "${base}/seed" checkout -q -b agent/99-test-fix
+  # The PR's own restore — identical patch-id to the older target-branch
+  # commit above (same file added with the same content), but a different
+  # full tree (file.txt is "removed-marker" here, not "base"). This is the
+  # commit that must actually be preserved.
+  echo "restore-me" > "${base}/seed/foo.txt"
+  git -C "${base}/seed" add foo.txt
+  commit_as "${base}/seed" "${human_email}" "Alice" "feat: restore foo"
+  echo "f1" > "${base}/seed/other.txt"
+  git -C "${base}/seed" add other.txt
+  commit_as "${base}/seed" "${bot_email}" "fullsend-fix" "fix: attempt 1"
+  git -C "${base}/seed" push -q -u origin agent/99-test-fix
+  local remote_tip
+  remote_tip="$(git -C "${base}/seed" rev-parse HEAD)"
+
+  git clone -q "${base}/remote.git" "${base}/repo"
+  push_rebase_ident "${base}/repo"
+  git -C "${base}/repo" checkout -q agent/99-test-fix
+  # Redo from scratch past the human's restore commit: reset to the fork
+  # point (main was never advanced) and recommit without restoring foo.txt.
+  git -C "${base}/repo" reset -q --hard origin/main
+  echo "f2" > "${base}/repo/other.txt"
+  git -C "${base}/repo" add other.txt
+  commit_as "${base}/repo" "${bot_email}" "fullsend-fix" "fix: redo from scratch"
+
+  write_history_rewritten_result "${base}/iteration-1/output"
+
+  local stdout_log="${PUSH_REBASE_TMPDIR}/stdout-${test_name}.log"
+  local exit_code=0
+  GIT_BOT_EMAIL="${bot_email}" \
+    run_push_rebase_postfix "${base}" "${stdout_log}" "${PUSH_REBASE_MOCK_BIN}" \
+    "test-user" "redo from scratch" || exit_code=$?
+
+  if [ "${exit_code}" -eq 0 ]; then
+    echo "FAIL: ${test_name} — expected non-zero exit; the dropped human restore commit shares a patch-id with an unrelated older target-branch commit, which must not count as preserving it"
+    cat "${stdout_log}"
+    FAILURES=$((FAILURES + 1))
+    return
+  fi
+  if ! grep -q "human-authored commit" "${stdout_log}"; then
+    echo "FAIL: ${test_name} — missing fail-closed message about the lost human commit"
+    cat "${stdout_log}"
+    FAILURES=$((FAILURES + 1))
+    return
+  fi
+  local after
+  after="$(git --git-dir="${base}/remote.git" rev-parse refs/heads/agent/99-test-fix)"
+  if [ "${after}" != "${remote_tip}" ]; then
+    echo "FAIL: ${test_name} — remote branch moved despite fail-closed rewrite"
+    echo "  want ${remote_tip}, got ${after}"
+    FAILURES=$((FAILURES + 1))
+    return
+  fi
+  echo "PASS: ${test_name}"
+}
+
 # A GitLab MR reconstruction can produce the exact same topology the
 # squash/redo skip checks for (diverged from origin/BRANCH, still contains
 # the fork point) even when no rewrite happened at all — reconstructed
@@ -3378,6 +3475,7 @@ run_push_history_rewrite_refuses_lost_code_agent_commit_test
 run_push_history_rewrite_preserves_squash_target_advanced_test
 run_push_history_rewrite_refuses_lost_human_commit_after_rebase_test
 run_push_history_rewrite_preserves_rebased_human_commit_test
+run_push_history_rewrite_refuses_target_history_patch_id_collision_test
 run_push_history_rewrite_indistinguishable_from_reconstruction_test
 run_push_history_rewrite_preserves_reconstructed_human_commit_test
 run_push_history_rewrite_bot_trigger_ignores_marker_test
