@@ -91,13 +91,11 @@ When `TIMEOUT_SECONDS` is set, use these thresholds (fractions of the
 budget so they scale to any timeout value; the one flat value is the
 300s fallback floor, whose cost does not scale with the budget):
 
-- **Before 9b (pre-commit):** If less than 10% of the budget remaining,
-  skip pre-commit entirely. Note: the post-script's authoritative
-  pre-commit check runs **after the sandbox is destroyed** — failures
-  caught there are terminal (`pre-commit-blocked`) and require human
-  re-dispatch. Running hooks in-sandbox, even via direct execution
-  when `pre-commit` itself cannot fetch repos (see step 9b STEP C),
-  is almost always cheaper than a terminal post-script failure.
+- **Before 9b (pre-commit):** If less than 10% of the budget remains,
+  skip pre-commit entirely. Running hooks in-sandbox — even via 9b's
+  direct-execution fallback — is almost always cheaper than the
+  terminal `pre-commit-blocked` post-script failure it avoids (9b
+  explains why).
 - **Before the direct-execution fallback in 9b:** if STEP B failed on
   infrastructure and less than 300s remains, skip the fallback,
   disclose it, and proceed to 9c (STEP C, RULE 1).
@@ -290,17 +288,11 @@ and `Glob` to inspect project configuration:
    **ticket-scope** (ticket in title), **area-scope** (codebase-area noun),
    or **unknown**.
 
-   **Priority rule:** classify **ticket-scope** whenever the docs,
-   commitlint config, or CI require or prefer a ticket id in the title —
-   ticket-scope wins whenever any ticket-id preference exists, even when
-   Conventional Commits or `config-conventional` is also cited. The
-   Conventional Commits spec (v1.0.0, item 4) says a scope MUST consist
-   of a noun describing a section of the codebase, so a repo that follows
-   the spec and shows no ticket-id preference anywhere (docs, examples,
-   commitlint config, existing PR titles, CI) is **area-scope**.
-   Commitlint's stock `config-conventional` preset does not restrict
-   `scope` to area nouns, though. Classify **unknown** only when neither
-   signal is present.
+   **Priority rule:** **ticket-scope** whenever any ticket-id preference
+   exists (docs, commitlint config, or CI), even if Conventional Commits
+   or `config-conventional` is also cited. **Area-scope** when the repo
+   follows the Conventional Commits spec (scope MUST be a codebase-area
+   noun) and shows no ticket-id preference anywhere. **Unknown** otherwise.
 5. **Check for PR template.** Find the repo's pull request template(s).
    If multiple templates exist, note them — you will select the right
    one in step 10d after classifying the task type. If found, read and
@@ -317,10 +309,9 @@ From these files, determine:
   `npm test`, `pytest`)
 - **Lint command** — how to run linters (e.g., `make lint`, `pre-commit run --files`)
 - **Commit conventions** — message format
-- **PR title conventions** — ticket-scope, area-scope, or unknown. The
-  post-script uses the commit subject as the PR title and injects
-  `(#ISSUE_NUMBER)` when there is no scope, unless `inject_issue_scope`
-  is `false` in agent-result.json.
+- **PR title conventions** — ticket-scope, area-scope, or unknown
+  (step 4). The post-script uses the commit subject as the PR title,
+  injecting `(#ISSUE_NUMBER)` unless `inject_issue_scope` is `false`.
 - **Branch conventions** — naming patterns, target branch
 
 Determine the correct target branch from the issue context. If the issue
@@ -345,11 +336,11 @@ if [ -z "${DEFAULT_BRANCH}" ] || [ "${DEFAULT_BRANCH}" = "HEAD" ]; then
 fi
 ```
 
-**Do not skip discovery and assume `"main"`.** If all discovery methods
-fail, `${DEFAULT_BRANCH:-main}` provides a last-resort fallback — but
-the post-script will auto-correct it to the API-discovered default branch
-when no explicit allowed list is configured. Getting discovery right here
-avoids an unnecessary correction and the warning that goes with it.
+**Do not skip discovery and assume `"main"`.** If all methods fail,
+`${DEFAULT_BRANCH:-main}` is a last-resort fallback — the post-script
+auto-corrects it to the API-discovered default when no explicit allowed
+list is configured, but getting discovery right here avoids that
+correction and its warning.
 
 Write the structured output file with the target branch now. Write only
 `target_branch` at this stage — `pr_body` is added after implementation
@@ -539,11 +530,10 @@ and how you will verify it works.
 
 Write the code change, then verify it.
 
-**Context efficiency:** A PostToolUse hook automatically compacts verification
-tool output. Successful runs of scan-secrets, pre-commit, tests, linters, and
-gitlint produce a one-line summary; only failures show full output. You do not
-need to redirect output or parse results manually — just run the commands and
-react to what you see.
+**Context efficiency:** A PostToolUse hook compacts verification output —
+scan-secrets, pre-commit, tests, linters, and gitlint show a one-line
+summary on success, full output on failure. Just run the commands; no
+need to redirect or parse output yourself.
 
 **Implementation:**
 
@@ -579,19 +569,14 @@ the scan passes.
 echo "::notice::STEP 9b: Pre-commit hooks"
 ```
 
-Pre-commit is bounded, not optional. Exactly three things let you stop
-short: the time-budget threshold above (under 10% of the budget
-remaining), the 300s fallback floor that guards STEP C's direct
-execution, and STEP D's two-run cap. Nothing else authorizes skipping
-it. The post-script
-(`post-code.sh`) runs an authoritative pre-commit check on the CI
-runner before pushing. However, the post-script runs **after the
-sandbox is destroyed** — any failure it catches is terminal
-(`pre-commit-blocked`), ending the run with no PR and requiring human
-re-dispatch. "The post-script runs it authoritatively"
-is therefore **not** a valid reason to skip verification. Running
-hooks in-sandbox catches the same failures while the agent can still
-fix them, avoiding an expensive terminal failure.
+Pre-commit is bounded, not optional. Only three things let you stop
+short: the time-budget threshold above (under 10% remaining), the 300s
+fallback floor guarding STEP C's direct execution, and STEP D's
+two-run cap. The post-script (`post-code.sh`) also runs pre-commit,
+but only **after the sandbox is destroyed** — a failure there is
+terminal (`pre-commit-blocked`, no PR, human re-dispatch), so that is
+not a reason to skip verification here: running hooks in-sandbox
+catches the same failures while you can still fix them.
 
 ```bash
 test -f .pre-commit-config.yaml && echo "pre-commit config found"
@@ -613,10 +598,10 @@ Do NOT run `pre-commit install --install-hooks` — it registers a git hook
 that can block `git commit`.
 
 **STEP A — Pre-format your code before running pre-commit.** Many hooks
-auto-fix files (formatters, trailing-whitespace, end-of-file-fixer). Doing
-this yourself first eliminates an entire re-run cycle. Check the repo's
-`.pre-commit-config.yaml` for which formatters are configured, then run
-them manually on your changed files. For example:
+auto-fix files (formatters, trailing-whitespace, end-of-file-fixer).
+Doing this first saves a re-run cycle. Check the repo's
+`.pre-commit-config.yaml` for configured formatters, then run them
+manually on your changed files. For example:
 
 ```bash
 # Run the repo's formatter directly — language varies:
@@ -638,10 +623,10 @@ mismatched style.
 pre-commit run --files <all-your-changed-files>
 ```
 
-Never run per-file. Many linter hooks analyze the entire project per
-invocation — running per-file multiplies that cost.
+Never run per-file — many linter hooks analyze the whole project per
+invocation, so per-file multiplies the cost.
 
-The first run may be slow (installs hook environments). This is normal.
+The first run may be slow (installs hook environments) — normal.
 
 **STEP C — React to the result:**
 
@@ -670,10 +655,9 @@ The first run may be slow (installs hook environments). This is normal.
 
   **Time recheck before the fallback.** The 10% gate measured the fast
   path; the fallback `pip install`s each hook at its pinned `rev`, and
-  timing out mid-install leaves no commit at all — worse than committing
-  with the hooks disclosed as unrun. Re-check against a flat 300s floor
-  (its cost does not scale with the budget; it may sit below 9c's 20%
-  retry floor, deliberately):
+  timing out mid-install leaves no commit — worse than disclosing the
+  hooks as unrun. Re-check against a flat 300s floor (deliberately
+  may sit below 9c's 20% retry floor):
 
   ```bash
   RUN_FALLBACK=1
@@ -778,13 +762,12 @@ The first run may be slow (installs hook environments). This is normal.
 
 **STEP D — After the retry, STOP regardless of the result.**
 
-If the second run passes (whether `pre-commit run` or direct execution
-of hooks), great. If it fails again, **you are done with pre-commit for
-this iteration**. Log the exact hook name, file, and error in your
-commit message and move on to 9c. Do NOT attempt a third run. Do NOT try
-a different fix. What is exhausted is the retry budget, not the problem:
-RULE 2 still requires you to disclose the failure, so a human sees it
-even if the runner rejects the commit.
+If the second run (pre-commit or direct execution) passes, great. If it
+fails again, **you are done with pre-commit for this iteration**: log
+the exact hook, file, and error in the commit message and move on to
+9c. Do NOT attempt a third run or a different fix — RULE 2 still
+requires disclosing the failure so a human sees it even if the runner
+rejects the commit.
 
 **RULES:**
 
@@ -799,7 +782,7 @@ even if the runner rejects the commit.
 2. **Always disclose.** If pre-commit did not pass, say so in the commit
    message with the exact error. Never claim hooks passed when they did
    not.
-3. **Pre-existing failures on files you did not touch are not your
+3. **Pre-existing failures on untouched files are not your
    responsibility.** Only run hooks on **your** changed files.
 4. **Do not refactor to satisfy a linter.** Fix the specific reported
    error — nothing more.
@@ -810,8 +793,8 @@ even if the runner rejects the commit.
 echo "::notice::STEP 9c: Tests and linters"
 ```
 
-You MUST run both **tests** and **linters** on the code you changed.
-Both are mandatory — do not skip either one.
+You MUST run both **tests** and **linters** on the code you changed —
+skipping either is not allowed.
 
 **Run targeted tests** — only test the packages/modules you changed:
 
@@ -842,10 +825,10 @@ Full-suite runs (`go test ./...`, `npm test`, `pytest`) are acceptable as
 a final validation after targeted tests pass, but prefer targeted runs
 first to save time and context budget.
 
-**Run the repo's lint command** — this is the lint command you identified
-in step 3 from `CLAUDE.md`, `CONTRIBUTING.md`, `Makefile`, or CI config.
-You MUST run it now. Linting is separate from pre-commit (9b) — even if
-pre-commit passed or was skipped, you still run the lint command here.
+**Run the repo's lint command** — the one identified in step 3 from
+`CLAUDE.md`, `CONTRIBUTING.md`, `Makefile`, or CI config. Linting is
+separate from pre-commit (9b): run it regardless of whether pre-commit
+passed or was skipped.
 
 ```bash
 # Use the exact lint command discovered in step 3. Examples:
