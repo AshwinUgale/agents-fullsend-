@@ -18,7 +18,7 @@
 #     (LoadRegistry: Version is int — quoted "1" fails yaml.v3)
 #   - optional name: allowed; rejects pipe/newline in id/scorer/name
 #   - ids unique per file; no duplicate top-level agent:/measurements:
-#   - scorer in known-scorer allow-list (fullsend ScorerFitness)
+#   - scorer in known-scorer allow-list (KNOWN_SCORERS)
 #   - id matches em-001-style lowercase (agents-repo style, not LoadRegistry)
 #   - YAML comment stripping matches YAML (# only after whitespace / col 0);
 #     residual # inside agent/id/scorer/name values is rejected
