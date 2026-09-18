@@ -41,7 +41,7 @@ import re
 import sys
 
 MEASUREMENTS_DIR, AGENTS_DIR = sys.argv[1], sys.argv[2]
-KNOWN_SCORERS = frozenset({"trace_fitness"})
+KNOWN_SCORERS = frozenset({"trace_fitness", "run_health"})
 ID_STYLE = re.compile(r"^[a-z][a-z0-9]*-[0-9]+$")
 # Matches fullsend MeasurementSpec yaml tags shipped today (id/scorer/version/name).
 FIELD_KEYS = frozenset({"id", "scorer", "version", "name"})
